@@ -40,7 +40,7 @@ class CodecKeys(
  * to the tool's entry point on an IO scope, so no receiver/worker hop is needed — or permitted,
  * since the sandbox blocks `android.content.BroadcastReceiver`.
  *
- * Spec: milestone-2.md § 4.3 (Native Push Notification).
+ * Spec: milestone-2.md § 4.4 (Native Push Notification).
  */
 class PushProcessor(
         private val database: ImessageDatabase,
