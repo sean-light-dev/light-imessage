@@ -4,10 +4,10 @@ label = "Light SDK iMessage Client"
 versionCode = 1
 versionName = "0.0.1"
 permissions = [
-    "android.permission.CAMERA",
     "android.permission.INTERNET",
+    "android.permission.ACCESS_NETWORK_STATE",
     "android.permission.POST_NOTIFICATIONS",
-    "android.permission.RECORD_AUDIO",
+    "android.permission.WAKE_LOCK",
 ]
 capabilities = []
 # change if you run this on an LP3!
