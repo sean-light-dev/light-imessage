@@ -2,7 +2,7 @@ package com.thelightphone.lightimessage.domain.native
 
 /**
  * Unix domain socket connection state for native service IPC. Follows state machine defined in
- * milestone-2.md.
+ * milestone-3.md § 5.1.
  */
 sealed class NativeServiceState {
     /** No active connection. Initial state. */
