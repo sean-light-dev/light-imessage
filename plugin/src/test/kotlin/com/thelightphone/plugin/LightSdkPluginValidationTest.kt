@@ -248,6 +248,51 @@ class LightSdkPluginValidationTest {
     }
 
     @Test
+    fun `ndkVersion in consumer build script is blocked`() {
+        val v = LightSdkPlugin.findBuildScriptViolations(
+            "android { ndkVersion = \"25.2.9519653\" }",
+            isConsumer = true,
+        )
+        assertTrue(v.any { "ndkVersion" in it }, "got $v")
+    }
+
+    @Test
+    fun `ndkVersion in native-service build script is allowed`() {
+        val v = LightSdkPlugin.findBuildScriptViolations(
+            "android { ndkVersion = \"25.2.9519653\" }",
+            isConsumer = true,
+            isNativeModule = true,
+        )
+        assertTrue(v.isEmpty(), "got $v")
+    }
+
+    @Test
+    fun `externalNativeBuild in consumer build script is blocked`() {
+        val v = LightSdkPlugin.findBuildScriptViolations(
+            "android { externalNativeBuild { cmake { path = file(\"CMakeLists.txt\") } } }",
+            isConsumer = true,
+        )
+        assertTrue(v.any { "externalNativeBuild" in it }, "got $v")
+    }
+
+    @Test
+    fun `abiFilters in native-service build script is allowed`() {
+        val v = LightSdkPlugin.findBuildScriptViolations(
+            "android { defaultConfig { ndk { abiFilters += setOf(\"arm64-v8a\") } } }",
+            isConsumer = true,
+            isNativeModule = true,
+        )
+        assertTrue(v.isEmpty(), "got $v")
+    }
+
+    @Test
+    fun `mockito bouncycastle and security-crypto are on the dependency allowlist`() {
+        assertTrue("org.mockito" in LightSdkPlugin.ALLOWED_DEPENDENCIES)
+        assertTrue("org.bouncycastle" in LightSdkPlugin.ALLOWED_DEPENDENCIES)
+        assertTrue("androidx.security" in LightSdkPlugin.ALLOWED_DEPENDENCIES)
+    }
+
+    @Test
     fun `disallowed plugin id is reported`() {
         val script = """
             plugins {
