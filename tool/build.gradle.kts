@@ -59,6 +59,9 @@ kotlin {
 
 dependencies {
     implementation(project(":sdk:client"))
+    // OkHttp: relay WebSocket transport + relay/provisioning HTTPS clients (ADR-002).
+    implementation(libs.okhttp)
     testImplementation(libs.kotlin.test)
+    testImplementation(libs.kotlinx.coroutines.test)
     ksp(libs.androidx.room.compiler)
 }
