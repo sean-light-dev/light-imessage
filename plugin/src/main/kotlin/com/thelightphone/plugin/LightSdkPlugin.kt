@@ -35,7 +35,12 @@ class LightSdkPlugin : Plugin<Project> {
             "androidx.room",
             "androidx.work",
             "androidx.startup",
+            "androidx.security",
             "androidx.media3",
+            "org.mockito",
+            "org.bouncycastle",
+            // Bundled native libraries (e.g. rustpush .so) ship inside the tool APK.
+            "io.github.david-allison:rust-push-android",
             "io.github.david-allison:anki-android-backend",
             "org.bouncycastle:bcprov-jdk18on",
             "com.google.zxing:core",
@@ -138,6 +143,20 @@ class LightSdkPlugin : Plugin<Project> {
             Regex("""\bsrcDirs?\s*\(""") to "custom source directories (srcDir/srcDirs) are not allowed",
         )
 
+        /**
+         * Build-script patterns banned on consumer (tool) modules EXCEPT the ones carrying
+         * bundled native code. Each pattern is paired with a predicate for which project names
+         * it applies to, so `native-service` can declare NDK settings without opening them up
+         * to every tool.
+         */
+        val CONSUMER_BUILD_SCRIPT_PATTERNS_EXCEPT_NATIVE = listOf(
+            Regex("""\bndkVersion\s*=""") to "ndkVersion is only allowed in native-service modules",
+            Regex("""\bexternalNativeBuild\b""") to "externalNativeBuild is only allowed in native-service modules",
+            Regex("""\babiFilters\b""") to "abiFilters is only allowed in native-service modules",
+        )
+
+        val NATIVE_MODULES = setOf("native-service")
+
         /** Build-script patterns banned only on consumer (tool) modules. */
         val CONSUMER_BUILD_SCRIPT_PATTERNS = listOf(
             Regex("""\bapplicationId\s*=""") to "applicationId must be declared in lighttool.toml, not the build script",
@@ -151,8 +170,15 @@ class LightSdkPlugin : Plugin<Project> {
         /**
          * Takes the script body and returns one violation message per problem. Used by the Gradle
          * Plugin entry point and by tests.
+         *
+         * @param isNativeModule true for modules in [NATIVE_MODULES] — they may additionally
+         *   declare NDK settings ([CONSUMER_BUILD_SCRIPT_PATTERNS_EXCEPT_NATIVE] is skipped).
          */
-        fun findBuildScriptViolations(content: String, isConsumer: Boolean): List<String> {
+        fun findBuildScriptViolations(
+            content: String,
+            isConsumer: Boolean,
+            isNativeModule: Boolean = false,
+        ): List<String> {
             val stripped = content
                 .replace(Regex("//.*"), "")
                 .replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), "")
@@ -172,6 +198,11 @@ class LightSdkPlugin : Plugin<Project> {
             if (isConsumer) {
                 CONSUMER_BUILD_SCRIPT_PATTERNS.forEach { (regex, msg) ->
                     if (regex.containsMatchIn(stripped)) violations.add(msg)
+                }
+                if (!isNativeModule) {
+                    CONSUMER_BUILD_SCRIPT_PATTERNS_EXCEPT_NATIVE.forEach { (regex, msg) ->
+                        if (regex.containsMatchIn(stripped)) violations.add(msg)
+                    }
                 }
             }
             return violations
@@ -335,7 +366,8 @@ class LightSdkPlugin : Plugin<Project> {
         val buildFile = project.buildFile
         if (!buildFile.exists()) return
         val isConsumer = project.name !in SDK_MODULES
-        findBuildScriptViolations(buildFile.readText(), isConsumer).forEach {
+        val isNativeModule = project.name in NATIVE_MODULES
+        findBuildScriptViolations(buildFile.readText(), isConsumer, isNativeModule).forEach {
             violations.add("  $it")
         }
     }

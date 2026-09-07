@@ -185,6 +185,8 @@ object LightToolPolicy {
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.NFC",
+        // Push-driven tools (e.g. iMessage) need to restart their push bridge after reboot.
+        "android.permission.RECEIVE_BOOT_COMPLETED",
     )
 
     const val DETACHED_AUDIO: String = "detached-audio"
