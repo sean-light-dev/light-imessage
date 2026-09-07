@@ -1,9 +1,14 @@
 [tool]
-id = "com.thelightphone.app"
-label = "Light SDK Tool"
+id = "com.thelightphone.lightimessage"
+label = "Light SDK iMessage Client"
 versionCode = 1
-versionName = "1.0.0"
-permissions = ["android.permission.INTERNET"]
+versionName = "0.0.1"
+permissions = [
+    "android.permission.CAMERA",
+    "android.permission.INTERNET",
+    "android.permission.POST_NOTIFICATIONS",
+    "android.permission.RECORD_AUDIO",
+]
 capabilities = []
 # change if you run this on an LP3!
 # serverPackage = "com.lightos"
