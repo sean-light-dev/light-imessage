@@ -3,11 +3,16 @@ package com.thelightphone.lightimessage.domain.native
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * Client interface for communicating with native service via Unix domain socket IPC. Implements
- * length-prefixed JSON message framing, correlation ID request-response matching, reconnection with
- * exponential backoff, and keepalive heartbeat.
+ * Client interface for communicating with the rustpush native service via Unix domain socket IPC.
  *
- * Spec: milestone-2.md § 4.4 (Native Push Notification), § 4.3 (Device Activation).
+ * Wire contract: `native-service/src/protocol.rs` — length-prefixed JSON frames (4-byte
+ * big-endian length + UTF-8 JSON) carrying serde internally-tagged messages (`"type"` in
+ * SCREAMING_SNAKE_CASE). Commands: `PING`, `ACTIVATE`, `SEND_MESSAGE`, `GET_MESSAGES`. Events:
+ * `PONG`, `ACTIVATION_STATUS`, `ACK`, `ERROR`. The service answers every command with exactly one
+ * event, in order — there are no correlation IDs; requests are serialized through a single
+ * request lock.
+ *
+ * Spec: milestone-3.md § 4.1–4.5 (deployment, activation, send, receive, heartbeat).
  */
 interface INativeServiceClient {
     /**
@@ -17,9 +22,9 @@ interface INativeServiceClient {
     val connectionState: StateFlow<NativeServiceState>
 
     /**
-     * Establish Unix domain socket connection to native service at /dev/socket/rustpush_ipc
-     * (configurable). Emits state = Connecting immediately, then Connected on socket open. On
-     * failure, retries with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s).
+     * Establish the socket connection to the native service (abstract namespace, name
+     * `rustpush_ipc`). Emits state = Connecting immediately, then Connected on socket open. On
+     * failure, retries with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s cap).
      *
      * @return Result.success if socket opens; Result.failure if all retries exhausted
      */
@@ -27,38 +32,44 @@ interface INativeServiceClient {
 
     /**
      * Close socket connection cleanly. Emits state = Disconnected. Cancels any pending reconnect
-     * timers and keepalive heartbeat.
+     * timers, the keepalive heartbeat, and any in-flight command.
      *
      * @return Result.success
      */
     suspend fun disconnect(): Result<Unit>
 
     /**
-     * Register hardware with native service. Sends RegisterHardware IPC message with hardware
-     * information and waits for response containing device ID.
+     * Drive one-time Apple ID activation in the native service (`ACTIVATE`). [twoFaCode] is sent
+     * on the second round trip once the user has supplied the 2FA challenge.
      *
-     * @param hwInfo Hardware information as raw bytes (format defined by native service)
-     * @return Result.success with device ID string; Result.failure if timeout, parse error, or
-     * socket not connected
+     * @return Result.success with the latest [ActivationStatus]; Result.failure on timeout,
+     * transport error, or an `ERROR` event from the service
      */
-    suspend fun registerHardware(hwInfo: ByteArray): Result<String>
+    suspend fun activate(
+            appleId: String,
+            password: String,
+            twoFaCode: String? = null,
+    ): Result<ActivationStatus>
 
     /**
-     * Poll native service for hardware activation status. Returns ActivationStatus sealed class
-     * indicating activated, pending, or failed state with relevant metadata.
+     * Send an outgoing iMessage via the native service (`SEND_MESSAGE`).
      *
-     * @param deviceId Device ID previously returned by registerHardware
-     * @return Result.success with ActivationStatus variant; Result.failure if timeout or socket
-     * error
+     * @return Result.success with the acknowledged messageId; Result.failure on timeout,
+     * transport error, or an `ERROR` event from the service
      */
-    suspend fun pollActivationStatus(deviceId: String): Result<ActivationStatus>
+    suspend fun sendMessage(
+            messageId: String,
+            recipients: List<String>,
+            text: String,
+            attachments: List<String> = emptyList(),
+    ): Result<String>
 
     /**
-     * Handle incoming push notification from UnifiedPush distributor. Forwards payload to native
-     * service asynchronously (non-blocking). Returns immediately; errors logged but not returned.
+     * Ask the native service for messages received since [sinceEpochMs] (`GET_MESSAGES`). The
+     * success-path response shape is a Rust-side TODO (the service currently answers `ERROR`);
+     * today this only proves out the transport.
      *
-     * @param payload Encrypted push payload bytes from UnifiedPush
-     * @return Result.success if queued; Result.failure if queue full (>100 messages)
+     * @return Result.success if the service accepted the command; Result.failure otherwise
      */
-    suspend fun handlePushNotification(payload: ByteArray): Result<Unit>
+    suspend fun getMessages(sinceEpochMs: Long): Result<Unit>
 }
