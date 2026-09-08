@@ -1,6 +1,6 @@
 package com.thelightphone.lightimessage
 
-import kotlin.test.Test
+import org.junit.Test
 
 /**
  * Unit tests for Plist + AES-GCM codec.
