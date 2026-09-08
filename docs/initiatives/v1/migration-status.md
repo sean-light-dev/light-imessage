@@ -97,9 +97,10 @@ even before the migration.
 4. **Secrets:** `EncryptedSharedPreferences` → DataStore + AndroidKeyStore AES-256-GCM
    (`security-crypto` was allowlisted afterwards; the hand-rolled impl was kept).
 5. **Tests:** junit → `kotlin.test`, mockito → hand-written fakes (`domain/auth/Fakes.kt`),
-   BouncyCastle → `testing/TestCertificate.kt` stub. (Mockito and BouncyCastle were both
-   allowlisted post-migration; the conversions stand.) `RelayServiceIntegrationTest` and the
-   `androidTest` suite were not migrated — `mockwebserver` and `androidx.test` remain banned.
+   BouncyCastle → `testing/TestCertificate.kt` stub. *(Reverted 2026-09 on v1 (`844974a`):
+   mockito and BouncyCastle were allowlisted post-migration, so the original mockito/BC test
+   sources are restored verbatim.)* `RelayServiceIntegrationTest` and the `androidTest` suite
+   remain unmigrated — `mockwebserver` and `androidx.test` are still banned.
 6. **Permissions:** tool declares INTERNET, ACCESS_NETWORK_STATE, POST_NOTIFICATIONS,
    WAKE_LOCK. Dropped as unallowlisted: READ/WRITE_EXTERNAL_STORAGE, BIND_JOB_SERVICE.
    RECEIVE_BOOT_COMPLETED is allowlisted but not yet declared.
@@ -136,11 +137,11 @@ practical.
 
 ## Open issues surfaced by the audit (code-level, not docs)
 
-- **Wire-format mismatch:** Kotlin `NativeServiceClient` sends `{"command": "ping"}` frames;
-  Rust `native-service/src/protocol.rs` expects serde-tagged `{"type": "PING"}` events.
-  Reconcile before the Rust build is wired into anything.
-- **`MessageDao.getUndelivered` over-matches:** `status != 2` with no `isOutgoing` filter —
-  the sync job can "resend" incoming DELIVERED/READ messages. Pre-existing; fix when the send
-  path is built.
-- **Socket namespace disagreement:** Kotlin uses filesystem `/dev/socket/rustpush_ipc`; the
-  Rust crate binds abstract-namespace `rustpush_ipc`. Pick one when the bridge is implemented.
+- ~~**Wire-format mismatch**~~ — **fixed on v1 (`6e1f547`):** `NativeServiceClient` now speaks
+  protocol.rs's contract (serde-tagged `"type"` frames, lockstep request/response, 16 MiB cap),
+  pinned byte-for-byte by `IpcProtocolTest`.
+- ~~**`MessageDao.getUndelivered` over-matches**~~ — **fixed on v1 (`9f873a8`):** query is now
+  `isOutgoing = 1 AND status NOT IN (2, 3, 4)` — only outgoing DRAFT/ENCRYPTED/FAILED retry.
+- ~~**Socket namespace disagreement**~~ — **fixed on v1 (`6e1f547`):** abstract namespace
+  `rustpush_ipc` won (the Rust crate already bound it); the Kotlin client now connects with
+  `LocalSocketAddress(..., Namespace.ABSTRACT)`.

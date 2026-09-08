@@ -29,7 +29,7 @@ The `rustpush` native service (`.so`, `arm64-v8a`) owns all Apple-side protocol 
 
 ### 2.2 IPC Message Catalog
 
-> [JSONSchema: IPCMessage](../schemas/IPCMessage.json) *(dead link — schema never committed; the Kotlin DTOs in `domain/native/NativeServiceClient.kt` are the de-facto contract. Note the Kotlin `{"command": ...}` frames and the Rust `native-service/src/protocol.rs` serde-tagged events do not currently match — reconcile when the Rust build is wired.)*
+> [JSONSchema: IPCMessage](../schemas/IPCMessage.json) *(dead link — schema never committed; the Kotlin DTOs in `domain/native/NativeServiceClient.kt` are the de-facto contract, reconciled to `protocol.rs`'s serde-tagged format on v1 in `6e1f547` and pinned by `IpcProtocolTest`)*
 
 ```mermaid
 classDiagram
