@@ -63,5 +63,8 @@ dependencies {
     implementation(libs.okhttp)
     testImplementation(libs.kotlin.test)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.mockito.core)
+    testImplementation(libs.mockito.kotlin)
+    testImplementation(libs.bouncycastle.pkix)
     ksp(libs.androidx.room.compiler)
 }

@@ -1,18 +1,23 @@
 package com.thelightphone.lightimessage.domain.auth
 
+import com.thelightphone.lightimessage.data.datastore.ITokenRepository
 import com.thelightphone.lightimessage.data.provisioning.ActivationStatus
 import com.thelightphone.lightimessage.data.provisioning.HardwareInfo
+import com.thelightphone.lightimessage.data.provisioning.IProvisioningClient
+import com.thelightphone.lightimessage.data.relay.IRelayHttpClient
 import com.thelightphone.lightimessage.data.relay.LoginResponse
 import com.thelightphone.lightimessage.data.relay.SessionResponse
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
-import kotlin.test.BeforeTest
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertFalse
-import kotlin.test.assertTrue
+import org.junit.Assert.*
+import org.junit.Before
+import org.junit.Test
+import org.mockito.Mock
+import org.mockito.MockitoAnnotations
+import org.mockito.kotlin.any
+import org.mockito.kotlin.whenever
 
 /**
  * Comprehensive integration tests for end-to-end authentication flow. Tests complete login
@@ -23,19 +28,17 @@ import kotlin.test.assertTrue
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class AuthFlowIntegrationTest {
-    private lateinit var tokenRepo: FakeTokenRepository
+    @Mock private lateinit var mockTokenRepository: ITokenRepository
 
-    private lateinit var relayClient: FakeRelayHttpClient
+    @Mock private lateinit var mockRelayClient: IRelayHttpClient
 
-    private lateinit var provisioningClient: FakeProvisioningClient
+    @Mock private lateinit var mockNativeClient: IProvisioningClient
 
     private val testScope = TestScope()
 
-    @BeforeTest
+    @Before
     fun setUp() {
-        tokenRepo = FakeTokenRepository()
-        relayClient = FakeRelayHttpClient()
-        provisioningClient = FakeProvisioningClient()
+        MockitoAnnotations.openMocks(this)
     }
 
     // ========== Full Login Flow ==========
@@ -51,58 +54,59 @@ class AuthFlowIntegrationTest {
      */
     @Test
     fun testFullLoginFlow() = runTest {
-        // Setup: successful credential submission → 2FA required
+        // Setup: Mock successful credential submission → 2FA required
         val twoFAChallenge = "2fa-challenge-xyz"
-        relayClient.onLoginWithCredentials = { _, _ ->
-            Result.success(LoginResponse.TwoFactorRequired(twoFAChallenge))
-        }
+        whenever(mockRelayClient.loginWithCredentials("test@icloud.com", "password123"))
+                .thenReturn(Result.success(LoginResponse.TwoFactorRequired(twoFAChallenge)))
 
-        // Setup: successful 2FA submission → session token
+        // Setup: Mock successful 2FA submission → session token
         val sessionToken = "session-token-abc123"
         val expiresAt = System.currentTimeMillis() + 3600000
-        relayClient.onSubmitTwoFactor = { _, _ ->
-            Result.success(SessionResponse(sessionToken, expiresAt))
-        }
+        whenever(mockRelayClient.submitTwoFactor(twoFAChallenge, "123456"))
+                .thenReturn(Result.success(SessionResponse(sessionToken, expiresAt)))
 
-        // Setup: repository provides the Apple ID stashed during earlier login step
-        tokenRepo.getAppleIdResult = Result.success("test@icloud.com")
+        // Setup: Repository provides the Apple ID stashed during earlier login step
+        whenever(mockTokenRepository.getAppleId()).thenReturn(Result.success("test@icloud.com"))
+        whenever(mockTokenRepository.saveAppleId("test@icloud.com"))
+                .thenReturn(Result.success(Unit))
+        whenever(mockTokenRepository.saveSessionToken(sessionToken, expiresAt))
+                .thenReturn(Result.success(Unit))
+        whenever(mockTokenRepository.saveHardwareInfo(any())).thenReturn(Result.success(Unit))
 
-        // Setup: hardware provisioning
+        // Setup: Mock hardware provisioning
         val deviceId = "device-xyz"
         val certData = byteArrayOf(1, 2, 3, 4)
-        provisioningClient.onRegisterHardware = { _, _ ->
-            Result.success(HardwareInfo(deviceId, certData))
-        }
-        provisioningClient.onPollActivationStatus = { _, _, _ ->
-            Result.success(ActivationStatus.Activated)
-        }
+        whenever(mockNativeClient.registerHardware(sessionToken, "test@icloud.com"))
+                .thenReturn(Result.success(HardwareInfo(deviceId, certData)))
+        whenever(mockNativeClient.pollActivationStatus(deviceId))
+                .thenReturn(Result.success(ActivationStatus.Activated))
 
         val machine = createAuthStateMachine()
 
         // Step 1: Request login with credentials
         val loginResult = machine.requestLogin(AppleId("test@icloud.com"), "password123")
-        assertTrue(loginResult.isSuccess, "Login request should succeed")
+        assertTrue("Login request should succeed", loginResult.isSuccess)
         assertEquals(
-            AuthState.AwaitingTwoFactorCode::class,
-            machine.getState().value::class,
-            "State should be AwaitingTwoFactorCode",
+                "State should be AwaitingTwoFactorCode",
+                AuthState.AwaitingTwoFactorCode::class,
+                machine.getState().value::class,
         )
 
         // Step 2: Submit 2FA code — machine synchronously flows through ProvisioningHardware
         // to SessionEstablished.
         val twoFAResult = machine.submitTwoFA("123456")
-        assertTrue(twoFAResult.isSuccess, "2FA submission should succeed")
+        assertTrue("2FA submission should succeed", twoFAResult.isSuccess)
 
         // Step 3: Verify session established
         val finalState = machine.getState().value
         assertEquals(
-            AuthState.SessionEstablished::class,
-            finalState::class,
-            "Final state should be SessionEstablished",
+                "Final state should be SessionEstablished",
+                AuthState.SessionEstablished::class,
+                finalState::class,
         )
         val sessionState = finalState as AuthState.SessionEstablished
-        assertEquals(sessionToken, sessionState.token, "Session token should match")
-        assertEquals(expiresAt, sessionState.expiresAt, "Expiry should match")
+        assertEquals("Session token should match", sessionToken, sessionState.token)
+        assertEquals("Expiry should match", expiresAt, sessionState.expiresAt)
     }
 
     // ========== Login Failure Scenarios ==========
@@ -115,23 +119,22 @@ class AuthFlowIntegrationTest {
      */
     @Test
     fun testLoginFailure() = runTest {
-        // Setup: failed credential submission (Result.failure — the state machine's retry
+        // Setup: Mock failed credential submission (Result.failure — the state machine's retry
         // helper unwraps Result and rethrows on exhaustion).
-        relayClient.onLoginWithCredentials = { _, _ ->
-            Result.failure(IllegalArgumentException("Invalid credentials"))
-        }
+        whenever(mockRelayClient.loginWithCredentials("wrong@icloud.com", "wrongpass"))
+                .thenReturn(Result.failure(IllegalArgumentException("Invalid credentials")))
 
         val machine = createAuthStateMachine()
 
         // Attempt login with bad credentials
         val result = machine.requestLogin(AppleId("wrong@icloud.com"), "wrongpass")
-        assertFalse(result.isSuccess, "Login should fail")
+        assertFalse("Login should fail", result.isSuccess)
 
         // Verify state is Failed
         val state = machine.getState().value
-        assertEquals(AuthState.Failed::class, state::class, "State should be Failed")
+        assertEquals("State should be Failed", AuthState.Failed::class, state::class)
         if (state is AuthState.Failed) {
-            assertTrue(state.error.isNotEmpty(), "Error message should contain details")
+            assertTrue("Error message should contain details", state.error.isNotEmpty())
         }
     }
 
@@ -145,25 +148,23 @@ class AuthFlowIntegrationTest {
      */
     @Test
     fun testTwoFAExpiry() = runTest {
-        // Setup: 2FA challenge
+        // Setup: Mock 2FA challenge
         val twoFAChallenge = "2fa-challenge-expired"
-        relayClient.onLoginWithCredentials = { _, _ ->
-            Result.success(LoginResponse.TwoFactorRequired(twoFAChallenge))
-        }
+        whenever(mockRelayClient.loginWithCredentials("test@icloud.com", "password"))
+                .thenReturn(Result.success(LoginResponse.TwoFactorRequired(twoFAChallenge)))
 
-        // Setup: 2FA submission failure due to expiry (all 3 retries)
-        relayClient.onSubmitTwoFactor = { _, _ ->
-            Result.failure(IllegalStateException("2FA code expired"))
-        }
+        // Setup: Mock 2FA submission failure due to expiry (all 3 retries)
+        whenever(mockRelayClient.submitTwoFactor(twoFAChallenge, "123456"))
+                .thenReturn(Result.failure(IllegalStateException("2FA code expired")))
 
         val machine = createAuthStateMachine()
 
         // Step 1: Trigger 2FA challenge
         machine.requestLogin(AppleId("test@icloud.com"), "password")
         assertEquals(
-            AuthState.AwaitingTwoFactorCode::class,
-            machine.getState().value::class,
-            "State should be AwaitingTwoFactorCode",
+                "State should be AwaitingTwoFactorCode",
+                AuthState.AwaitingTwoFactorCode::class,
+                machine.getState().value::class,
         )
 
         // Step 2: Submit code after expiry — a single call bumps the retry counter once. The
@@ -171,11 +172,11 @@ class AuthFlowIntegrationTest {
         // (so they can re-enter the code), then transitions to Failed.
         var lastResult: Result<Unit> = Result.success(Unit)
         repeat(3) { lastResult = machine.submitTwoFA("123456") }
-        assertFalse(lastResult.isSuccess, "Submission of expired code should fail")
+        assertFalse("Submission of expired code should fail", lastResult.isSuccess)
 
         // Verify state is Failed
         val state = machine.getState().value
-        assertEquals(AuthState.Failed::class, state::class, "State should be Failed")
+        assertEquals("State should be Failed", AuthState.Failed::class, state::class)
     }
 
     // ========== Session Refresh ==========
@@ -193,27 +194,28 @@ class AuthFlowIntegrationTest {
         val newToken = "new-token-xyz"
         val newExpiresAt = System.currentTimeMillis() + 3600000
 
-        tokenRepo.getSessionTokenResult = Result.success(oldToken)
-        relayClient.onRefreshToken = {
-            Result.success(SessionResponse(newToken, newExpiresAt))
-        }
+        whenever(mockTokenRepository.getSessionToken()).thenReturn(Result.success(oldToken))
+        whenever(mockRelayClient.refreshToken(oldToken))
+                .thenReturn(Result.success(SessionResponse(newToken, newExpiresAt)))
+        whenever(mockTokenRepository.saveSessionToken(newToken, newExpiresAt))
+                .thenReturn(Result.success(Unit))
 
         val machine = createAuthStateMachine()
 
         // Trigger token refresh
         val refreshResult = machine.refreshToken()
-        assertTrue(refreshResult.isSuccess, "Session refresh should complete")
+        assertTrue("Session refresh should complete", refreshResult.isSuccess)
 
         // Verify state transitioned to SessionEstablished with the new token
         val state = machine.getState().value
         assertEquals(
-            AuthState.SessionEstablished::class,
-            state::class,
-            "State should be SessionEstablished after refresh",
+                "State should be SessionEstablished after refresh",
+                AuthState.SessionEstablished::class,
+                state::class,
         )
         val sessionState = state as AuthState.SessionEstablished
-        assertEquals(newToken, sessionState.token, "New token should be applied")
-        assertEquals(newExpiresAt, sessionState.expiresAt, "New expiry should be applied")
+        assertEquals("New token should be applied", newToken, sessionState.token)
+        assertEquals("New expiry should be applied", newExpiresAt, sessionState.expiresAt)
     }
 
     // ========== Logout and Relogin ==========
@@ -231,22 +233,24 @@ class AuthFlowIntegrationTest {
         val sessionToken = "session-token-1"
         val expiresAt = System.currentTimeMillis() + 3600000
 
-        relayClient.onLoginWithCredentials = { _, _ ->
-            Result.success(LoginResponse.TwoFactorRequired(twoFAChallenge))
-        }
-        relayClient.onSubmitTwoFactor = { _, _ ->
-            Result.success(SessionResponse(sessionToken, expiresAt))
-        }
+        whenever(mockRelayClient.loginWithCredentials("user@icloud.com", "pass1"))
+                .thenReturn(Result.success(LoginResponse.TwoFactorRequired(twoFAChallenge)))
+        whenever(mockRelayClient.submitTwoFactor(twoFAChallenge, "111111"))
+                .thenReturn(Result.success(SessionResponse(sessionToken, expiresAt)))
 
         val deviceId = "device-1"
         val certData = byteArrayOf(9, 9, 9)
-        tokenRepo.getAppleIdResult = Result.success("user@icloud.com")
-        provisioningClient.onRegisterHardware = { _, _ ->
-            Result.success(HardwareInfo(deviceId, certData))
-        }
-        provisioningClient.onPollActivationStatus = { _, _, _ ->
-            Result.success(ActivationStatus.Activated)
-        }
+        whenever(mockTokenRepository.getAppleId()).thenReturn(Result.success("user@icloud.com"))
+        whenever(mockTokenRepository.saveAppleId("user@icloud.com"))
+                .thenReturn(Result.success(Unit))
+        whenever(mockTokenRepository.saveSessionToken(sessionToken, expiresAt))
+                .thenReturn(Result.success(Unit))
+        whenever(mockTokenRepository.saveHardwareInfo(any())).thenReturn(Result.success(Unit))
+        whenever(mockTokenRepository.clearSessionToken()).thenReturn(Result.success(Unit))
+        whenever(mockNativeClient.registerHardware(sessionToken, "user@icloud.com"))
+                .thenReturn(Result.success(HardwareInfo(deviceId, certData)))
+        whenever(mockNativeClient.pollActivationStatus(deviceId))
+                .thenReturn(Result.success(ActivationStatus.Activated))
 
         val machine = createAuthStateMachine()
 
@@ -256,30 +260,28 @@ class AuthFlowIntegrationTest {
 
         val sessionState = machine.getState().value
         assertEquals(
-            AuthState.SessionEstablished::class,
-            sessionState::class,
-            "Should be SessionEstablished after login",
+                "Should be SessionEstablished after login",
+                AuthState.SessionEstablished::class,
+                sessionState::class,
         )
 
         // Step 2: Logout
         val logoutResult = machine.logout()
-        assertTrue(logoutResult.isSuccess, "Logout should succeed")
-        assertEquals(AuthState.Idle, machine.getState().value, "State should return to Idle")
+        assertTrue("Logout should succeed", logoutResult.isSuccess)
+        assertEquals("State should return to Idle", AuthState.Idle, machine.getState().value)
 
-        // Step 3: Setup second login with different credentials — reassign the fake's lambda,
-        // mirroring the old second `whenever(...)` stubbing.
+        // Step 3: Setup second login with different credentials
         val twoFAChallenge2 = "2fa-challenge-2"
-        relayClient.onLoginWithCredentials = { _, _ ->
-            Result.success(LoginResponse.TwoFactorRequired(twoFAChallenge2))
-        }
+        whenever(mockRelayClient.loginWithCredentials("user2@icloud.com", "pass2"))
+                .thenReturn(Result.success(LoginResponse.TwoFactorRequired(twoFAChallenge2)))
 
         // Step 4: Relogin
         val reloginResult = machine.requestLogin(AppleId("user2@icloud.com"), "pass2")
-        assertTrue(reloginResult.isSuccess, "Relogin should succeed")
+        assertTrue("Relogin should succeed", reloginResult.isSuccess)
         assertEquals(
-            AuthState.AwaitingTwoFactorCode::class,
-            machine.getState().value::class,
-            "State should be AwaitingTwoFactorCode",
+                "State should be AwaitingTwoFactorCode",
+                AuthState.AwaitingTwoFactorCode::class,
+                machine.getState().value::class,
         )
     }
 
@@ -296,9 +298,8 @@ class AuthFlowIntegrationTest {
     @Test
     fun testConcurrentAuthAttempts() = runTest {
         val twoFAChallenge = "2fa-challenge"
-        relayClient.onLoginWithCredentials = { _, _ ->
-            Result.success(LoginResponse.TwoFactorRequired(twoFAChallenge))
-        }
+        whenever(mockRelayClient.loginWithCredentials("test@icloud.com", "password"))
+                .thenReturn(Result.success(LoginResponse.TwoFactorRequired(twoFAChallenge)))
 
         val machine = createAuthStateMachine()
 
@@ -314,8 +315,8 @@ class AuthFlowIntegrationTest {
         // At minimum, state should be consistent (not corrupted).
         val finalState = machine.getState().value
         assertTrue(
-            finalState is AuthState.AwaitingTwoFactorCode || finalState is AuthState.Failed,
-            "Final state should be valid",
+                "Final state should be valid",
+                finalState is AuthState.AwaitingTwoFactorCode || finalState is AuthState.Failed,
         )
     }
 
@@ -323,9 +324,9 @@ class AuthFlowIntegrationTest {
 
     private fun createAuthStateMachine(): AuthStateMachine =
             AuthStateMachine(
-                    tokenRepository = tokenRepo,
-                    relayClient = relayClient,
-                    nativeClient = provisioningClient,
+                    tokenRepository = mockTokenRepository,
+                    relayClient = mockRelayClient,
+                    nativeClient = mockNativeClient,
                     scope = testScope,
             )
 }
