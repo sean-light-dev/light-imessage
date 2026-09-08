@@ -8,11 +8,6 @@ import java.io.DataOutputStream
 import java.io.EOFException
 import java.io.IOException
 import java.nio.charset.StandardCharsets
-import java.security.KeyFactory
-import java.security.spec.X509EncodedKeySpec
-import java.util.Base64
-import java.util.UUID
-import java.util.concurrent.CompletableFuture
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CompletableDeferred
@@ -21,41 +16,47 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.future.await
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 /**
- * Unix domain socket IPC client for native service communication. Implements length-prefixed JSON
- * message framing, request-response correlation via UUID, heartbeat ping/pong, and reconnection
- * with exponential backoff.
+ * Unix domain socket IPC client for the rustpush native service.
  *
- * Protocol: 4-byte big-endian length prefix + UTF-8 JSON payload. Max frame size 1 MB, queue depth
- * ≤100 messages. Heartbeat every 30s with 5s pong timeout. All IPC calls timeout at 10s.
+ * Wire contract (must match `native-service/src/protocol.rs`):
+ * - Transport: abstract-namespace AF_UNIX socket `rustpush_ipc`.
+ * - Framing: 4-byte big-endian length header + UTF-8 JSON payload, max frame 16 MiB.
+ * - Messages: serde internally-tagged JSON (`"type"` in SCREAMING_SNAKE_CASE). The service
+ *   answers every command with exactly one event, in order, so commands are serialized through
+ *   a single request lock — there are no correlation IDs on the wire.
+ * - Heartbeat: `PING` every 30s; a missing `PONG` within 5s triggers reconnect with exponential
+ *   backoff (1s, 2s, 4s, 8s, 16s, 32s cap; 5 attempts before terminal `Failed`).
  *
- * Spec: milestone-2.md § 4.3 (Device Activation), § 4.4 (Push Notification), § 6.3 (IPC Framing), §
- * 6.4 (Reconnect Backoff).
+ * Spec: milestone-3.md § 4.1–4.5, § 5.1, § 6.2–6.5.
  */
 class NativeServiceClient(
         private val scope: CoroutineScope,
-        private val socketPath: String = "/dev/socket/rustpush_ipc",
+        private val socketName: String = DEFAULT_SOCKET_NAME,
 ) : INativeServiceClient {
+
     private val _connectionState =
             MutableStateFlow<NativeServiceState>(NativeServiceState.Disconnected)
     override val connectionState: StateFlow<NativeServiceState> = _connectionState
 
     private var ipcSocket: LocalSocket? = null
-    private val ipcQueue: MutableList<IpcMessage> = mutableListOf()
-    private val pendingRequests: MutableMap<String, CompletableFuture<IpcMessage>> = mutableMapOf()
-    private val queueMutex = Mutex()
     private val socketMutex = Mutex() // guards ipcSocket ref (assign/close)
-    private val writeMutex = Mutex() // serializes concurrent writers on the socket
-    private val pendingRequestsMutex = Mutex()
+
+    /** Serializes commands: the service answers one event per command, in order. */
+    private val requestMutex = Mutex()
+
+    /** Awaits the response to the in-flight command (at most one, under [requestMutex]). */
+    @Volatile private var pendingResponse: CompletableDeferred<IpcEvent>? = null
+
     private val reconnectPolicy: ReconnectPolicy =
             ReconnectPolicy(maxAttempts = 5, baseDelayMs = 1000)
 
@@ -64,15 +65,16 @@ class NativeServiceClient(
     private var readLoopJob: Job? = null
     private var reconnectJob: Job? = null
 
-    // Latest outstanding pong wait, completed when a "pong" frame arrives.
-    @Volatile private var pongDeferred: CompletableDeferred<Unit>? = null
-
-    private val json = Json { ignoreUnknownKeys = true }
+    private val json = ipcJson
 
     private companion object {
         private const val TAG = "NativeServiceClient"
-        private const val MAX_FRAME_SIZE = 1024 * 1024 // 1 MB
-        private const val MAX_QUEUE_DEPTH = 100
+
+        /** Abstract-namespace socket name; must match `socket.rs`'s `DEFAULT_SOCKET_NAME`. */
+        private const val DEFAULT_SOCKET_NAME = "rustpush_ipc"
+
+        /** Matches `protocol.rs`'s `MAX_FRAME_LEN`. */
+        private const val MAX_FRAME_SIZE = 16 * 1024 * 1024
         private const val IPC_TIMEOUT_MS = 10_000L // 10 seconds
         private const val HEARTBEAT_INTERVAL_MS = 30_000L // 30 seconds
         private const val PONG_TIMEOUT_MS = 5_000L // 5 seconds
@@ -100,8 +102,8 @@ class NativeServiceClient(
             keepaliveJob = null
             readLoopJob?.cancel()
             readLoopJob = null
-            pongDeferred?.cancel()
-            pongDeferred = null
+            pendingResponse?.cancel()
+            pendingResponse = null
 
             socketMutex.withLock {
                 ipcSocket?.close()
@@ -115,104 +117,71 @@ class NativeServiceClient(
         }
     }
 
-    override suspend fun registerHardware(hwInfo: ByteArray): Result<String> {
+    override suspend fun activate(
+            appleId: String,
+            password: String,
+            twoFaCode: String?,
+    ): Result<ActivationStatus> {
         return try {
-            val correlationId = UUID.randomUUID().toString()
-            val message =
-                    IpcMessage(
-                            correlationId = correlationId,
-                            command = "register_hardware",
-                            payload =
-                                    Base64.getEncoder()
-                                            .encodeToString(hwInfo)
-                                            .toByteArray(StandardCharsets.UTF_8),
-                            timestamp = System.currentTimeMillis(),
-                    )
-
-            val response =
-                    withTimeoutOrNull(IPC_TIMEOUT_MS) { sendMessage(message) }
-                            ?: return Result.failure(IOException("IPC timeout"))
-
-            // Parse response: { "device_id": "..." }
-            val responseJson = String(response.payload, StandardCharsets.UTF_8)
-            val dto = json.decodeFromString(RegisterHardwareResponseDto.serializer(), responseJson)
-            Result.success(dto.device_id)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    override suspend fun pollActivationStatus(deviceId: String): Result<ActivationStatus> {
-        return try {
-            val correlationId = UUID.randomUUID().toString()
-            val message =
-                    IpcMessage(
-                            correlationId = correlationId,
-                            command = "poll_activation",
-                            payload = deviceId.toByteArray(StandardCharsets.UTF_8),
-                            timestamp = System.currentTimeMillis(),
-                    )
-
-            val response =
-                    withTimeoutOrNull(IPC_TIMEOUT_MS) { sendMessage(message) }
-                            ?: return Result.failure(IOException("IPC timeout"))
-
-            // Parse response: { "status": "activated|pending|failed", ... }
-            val responseJson = String(response.payload, StandardCharsets.UTF_8)
-            val dto = json.decodeFromString(ActivationStatusDto.serializer(), responseJson)
-
-            val status =
-                    when (dto.status) {
-                        "activated" -> {
-                            // Decode public key from base64
-                            val keyBytes = Base64.getDecoder().decode(dto.public_key ?: "")
-                            val spec = X509EncodedKeySpec(keyBytes)
-                            val factory = KeyFactory.getInstance("RSA")
-                            val publicKey = factory.generatePublic(spec)
-                            ActivationStatus.Activated(deviceId, publicKey)
-                        }
-                        "pending" ->
-                                ActivationStatus.Pending(dto.attempt ?: 0, dto.next_poll_in ?: 0)
-                        "failed" -> ActivationStatus.Failed(dto.error ?: "Unknown error")
-                        else ->
-                                return Result.failure(
-                                        IOException("Unknown activation status: ${dto.status}"),
-                                )
-                    }
-
-            Result.success(status)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    override suspend fun handlePushNotification(payload: ByteArray): Result<Unit> {
-        return try {
-            queueMutex.withLock {
-                if (ipcQueue.size >= MAX_QUEUE_DEPTH) {
-                    return Result.failure(
-                            IOException("IPC queue full (>${MAX_QUEUE_DEPTH} messages)"),
-                    )
-                }
-
-                val message =
-                        IpcMessage(
-                                correlationId = UUID.randomUUID().toString(),
-                                command = "push_notification",
-                                payload =
-                                        Base64.getEncoder()
-                                                .encodeToString(payload)
-                                                .toByteArray(StandardCharsets.UTF_8),
-                                timestamp = System.currentTimeMillis(),
-                        )
-
-                ipcQueue.add(message)
+            when (
+                    val event =
+                            sendCommand(
+                                    IpcCommand.Activate(appleId, password, twoFaCode),
+                                    IPC_TIMEOUT_MS,
+                            )
+            ) {
+                is IpcEvent.ActivationStatusEvent ->
+                        Result.success(ActivationStatus(event.status, event.handles))
+                is IpcEvent.Error ->
+                        Result.failure(IOException("Native service error: ${event.message}"))
+                else -> Result.failure(IOException("Unexpected response to ACTIVATE"))
             }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 
-            // Non-blocking: dispatch send in background
-            scope.launch { drainQueue() }
+    override suspend fun sendMessage(
+            messageId: String,
+            recipients: List<String>,
+            text: String,
+            attachments: List<String>,
+    ): Result<String> {
+        return try {
+            when (
+                    val event =
+                            sendCommand(
+                                    IpcCommand.SendMessage(
+                                            messageId,
+                                            recipients,
+                                            text,
+                                            attachments,
+                                    ),
+                                    IPC_TIMEOUT_MS,
+                            )
+            ) {
+                is IpcEvent.Ack -> Result.success(event.messageId)
+                is IpcEvent.Error ->
+                        Result.failure(IOException("Native service error: ${event.message}"))
+                else -> Result.failure(IOException("Unexpected response to SEND_MESSAGE"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 
-            Result.success(Unit)
+    override suspend fun getMessages(sinceEpochMs: Long): Result<Unit> {
+        return try {
+            when (
+                    val event =
+                            sendCommand(IpcCommand.GetMessages(sinceEpochMs), IPC_TIMEOUT_MS)
+            ) {
+                is IpcEvent.Error ->
+                        Result.failure(IOException("Native service error: ${event.message}"))
+                // The success response shape is a Rust-side TODO (protocol.rs has no message
+                // event variant yet); any non-error event means the command was accepted.
+                else -> Result.success(Unit)
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -230,7 +199,7 @@ class NativeServiceClient(
         }
 
         val socket = LocalSocket()
-        val address = LocalSocketAddress(socketPath, LocalSocketAddress.Namespace.FILESYSTEM)
+        val address = LocalSocketAddress(socketName, LocalSocketAddress.Namespace.ABSTRACT)
 
         socket.connect(address) // throws on failure
         socketMutex.withLock { ipcSocket = socket }
@@ -245,8 +214,6 @@ class NativeServiceClient(
         reconnectAttempt.set(0)
 
         startHeartbeat()
-        // Fire-and-forget: drain queued messages after connect.
-        scope.launch { drainQueue() }
     }
 
     /** Called when socket connection fails. Triggers reconnection with backoff. */
@@ -255,8 +222,8 @@ class NativeServiceClient(
         keepaliveJob = null
         readLoopJob?.cancel()
         readLoopJob = null
-        pongDeferred?.cancel()
-        pongDeferred = null
+        pendingResponse?.cancel()
+        pendingResponse = null
 
         socketMutex.withLock {
             ipcSocket?.close()
@@ -290,43 +257,46 @@ class NativeServiceClient(
         }
     }
 
-    /** Send IPC message and wait for response with matching correlationId (with timeout). */
-    private suspend fun sendMessage(msg: IpcMessage): IpcMessage {
-        val responseFuture = CompletableFuture<IpcMessage>()
-        pendingRequestsMutex.withLock { pendingRequests[msg.correlationId] = responseFuture }
-
-        try {
-            writeFrame(msg)
-            // Cooperative suspend — cancellable by outer withTimeoutOrNull.
-            return responseFuture.await()
-        } finally {
-            pendingRequestsMutex.withLock { pendingRequests.remove(msg.correlationId) }
+    /**
+     * Send a command and wait for its response event (with timeout). The service answers every
+     * command with exactly one event in order, so commands are fully serialized through
+     * [requestMutex]: write the frame, then hold the lock until the response lands.
+     */
+    private suspend fun sendCommand(command: IpcCommand, timeoutMs: Long): IpcEvent {
+        requestMutex.withLock {
+            val deferred = CompletableDeferred<IpcEvent>()
+            pendingResponse = deferred
+            try {
+                writeFrame(json.encodeToString(IpcCommand.serializer(), command))
+                // Cooperative suspend — cancellable by the outer timeout.
+                return withTimeoutOrNull(timeoutMs) { deferred.await() }
+                        ?: throw IOException("IPC timeout")
+            } finally {
+                pendingResponse = null
+            }
         }
     }
 
     /** Write IPC frame to socket: 4-byte big-endian length + JSON payload. */
-    private suspend fun writeFrame(msg: IpcMessage) =
-            writeMutex.withLock {
-                val socket = ipcSocket ?: throw IOException("Socket not connected")
+    private suspend fun writeFrame(jsonString: String) {
+        val socket = ipcSocket ?: throw IOException("Socket not connected")
 
-                val jsonString = serializeMessage(msg)
-                val jsonBytes = jsonString.toByteArray(StandardCharsets.UTF_8)
+        val jsonBytes = jsonString.toByteArray(StandardCharsets.UTF_8)
+        if (jsonBytes.size > MAX_FRAME_SIZE) {
+            throw IOException("Message too large: ${jsonBytes.size} > $MAX_FRAME_SIZE")
+        }
 
-                if (jsonBytes.size > MAX_FRAME_SIZE) {
-                    throw IOException("Message too large: ${jsonBytes.size} > $MAX_FRAME_SIZE")
-                }
-
-                val frame = frameData(jsonBytes)
-                // LocalSocket.outputStream is non-null in practice — fail loudly if it isn't.
-                socket.outputStream!!.write(frame)
-                socket.outputStream!!.flush()
-            }
+        val frame = frameData(jsonBytes)
+        // LocalSocket.outputStream is non-null in practice — fail loudly if it isn't.
+        socket.outputStream!!.write(frame)
+        socket.outputStream!!.flush()
+    }
 
     /**
      * Read IPC frame from socket: 4-byte big-endian length + JSON payload. Called only from the
      * single-consumer read loop, so no synchronization is needed.
      */
-    private fun readFrame(): IpcMessage {
+    private fun readFrame(): IpcEvent {
         val socket = ipcSocket ?: throw IOException("Socket not connected")
         val input = socket.inputStream ?: throw IOException("No input stream")
 
@@ -352,7 +322,7 @@ class NativeServiceClient(
         }
 
         val jsonString = String(payload, StandardCharsets.UTF_8)
-        return deserializeMessage(jsonString)
+        return json.decodeFromString(IpcEvent.serializer(), jsonString)
     }
 
     /** Add 4-byte big-endian length prefix to data. */
@@ -365,63 +335,17 @@ class NativeServiceClient(
         return output.toByteArray()
     }
 
-    /** Serialize IpcMessage to JSON. */
-    private fun serializeMessage(msg: IpcMessage): String {
-        val dto =
-                IpcMessageDto(
-                        correlation_id = msg.correlationId,
-                        command = msg.command,
-                        payload = String(msg.payload, StandardCharsets.UTF_8),
-                        timestamp = msg.timestamp,
-                )
-        return json.encodeToString(IpcMessageDto.serializer(), dto)
-    }
-
-    /** Deserialize JSON to IpcMessage. */
-    private fun deserializeMessage(jsonString: String): IpcMessage {
-        val dto = json.decodeFromString(IpcMessageDto.serializer(), jsonString)
-        return IpcMessage(
-                correlationId = dto.correlation_id,
-                command = dto.command,
-                payload = dto.payload.toByteArray(StandardCharsets.UTF_8),
-                timestamp = dto.timestamp,
-        )
-    }
-
-    /** Start keepalive ping every 30 seconds. */
+    /** Start keepalive: `PING` every 30s; a `PONG` timeout (5s) triggers reconnect. */
     private fun startHeartbeat() {
         keepaliveJob?.cancel()
         keepaliveJob =
                 scope.launch {
                     while (coroutineContext.isActive) {
                         delay(HEARTBEAT_INTERVAL_MS)
-
                         try {
-                            val ping =
-                                    IpcMessage(
-                                            correlationId = UUID.randomUUID().toString(),
-                                            command = "ping",
-                                            payload = ByteArray(0),
-                                            timestamp = System.currentTimeMillis(),
-                                    )
-
-                            // Install pong waiter BEFORE writing so we cannot miss a fast response.
-                            val deferred = CompletableDeferred<Unit>()
-                            pongDeferred = deferred
-
-                            writeFrame(ping)
-
-                            val received = withTimeoutOrNull(PONG_TIMEOUT_MS) { deferred.await() }
-                            pongDeferred = null
-
-                            if (received == null) {
-                                // Timeout; reconnect
-                                onSocketFailure(IOException("Ping timeout"))
-                                break
-                            }
+                            sendCommand(IpcCommand.Ping, PONG_TIMEOUT_MS)
                         } catch (e: Exception) {
-                            Log.e(TAG, "Failed to send keepalive ping: ${e.message}")
-                            pongDeferred = null
+                            Log.e(TAG, "Keepalive ping failed: ${e.message}")
                             onSocketFailure(e)
                             break
                         }
@@ -430,7 +354,7 @@ class NativeServiceClient(
     }
 
     /**
-     * Start read loop to receive incoming messages from socket. Completes [ready] as soon as the
+     * Start read loop to receive incoming events from the socket. Completes [ready] as soon as the
      * loop coroutine is running so callers can be sure the reader is up before emitting Connected.
      */
     private fun startReadLoop(ready: CompletableDeferred<Unit>) {
@@ -440,8 +364,14 @@ class NativeServiceClient(
                     ready.complete(Unit)
                     try {
                         while (coroutineContext.isActive) {
-                            val msg = readFrame()
-                            handleIncomingMessage(msg)
+                            val event = readFrame()
+                            // Route to the in-flight command. An event with no waiter is late
+                            // (arrived after a timeout) — log and drop. Log the type only: event
+                            // payloads may carry message content.
+                            val delivered = pendingResponse?.complete(event) == true
+                            if (!delivered) {
+                                Log.w(TAG, "Dropping late or unsolicited IPC event")
+                            }
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Read loop failed: ${e.message}")
@@ -449,89 +379,70 @@ class NativeServiceClient(
                     }
                 }
     }
-
-    /** Handle incoming message: route to pending request or handle built-in commands. */
-    private suspend fun handleIncomingMessage(msg: IpcMessage) {
-        // Check if this is a response to a pending request
-        val future = pendingRequestsMutex.withLock { pendingRequests[msg.correlationId] }
-        if (future != null) {
-            future.complete(msg)
-            return
-        }
-
-        // Handle built-in commands
-        when (msg.command) {
-            "pong" -> {
-                // Keepalive pong received; unblock the waiter.
-                pongDeferred?.complete(Unit)
-            }
-            "ping" -> {
-                // Echo ping with pong
-                val pong =
-                        IpcMessage(
-                                correlationId = msg.correlationId,
-                                command = "pong",
-                                payload = ByteArray(0),
-                                timestamp = System.currentTimeMillis(),
-                        )
-                writeFrame(pong)
-            }
-            else -> {
-                // Unknown unsolicited message; log and ignore
-                Log.e(TAG, "Unknown unsolicited command: ${msg.command}")
-            }
-        }
-    }
-
-    /** Drain message queue and send to socket (non-blocking, fire-and-forget). */
-    private suspend fun drainQueue() {
-        val messagesToSend =
-                queueMutex.withLock {
-                    val msgs = ipcQueue.toList()
-                    ipcQueue.clear()
-                    msgs
-                }
-
-        for (msg in messagesToSend) {
-            try {
-                writeFrame(msg)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to send queued message: ${e.message}")
-                // Requeue on failure (up to queue depth limit)
-                queueMutex.withLock {
-                    if (ipcQueue.size < MAX_QUEUE_DEPTH) {
-                        ipcQueue.add(msg)
-                    }
-                }
-            }
-        }
-    }
 }
 
-/** Internal representation of IPC message. */
-internal data class IpcMessage(
-        val correlationId: String,
-        val command: String,
-        val payload: ByteArray,
-        val timestamp: Long,
-) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is IpcMessage) return false
-        if (correlationId != other.correlationId) return false
-        if (command != other.command) return false
-        if (!payload.contentEquals(other.payload)) return false
-        if (timestamp != other.timestamp) return false
-        return true
-    }
+/**
+ * JSON codec for the IPC wire format. Shared by [NativeServiceClient] and the contract tests in
+ * `IpcProtocolTest` so the wire format is tested exactly as used.
+ */
+internal val ipcJson = Json {
+    ignoreUnknownKeys = true
+    classDiscriminator = "type"
+    // serde_json always emits struct fields (e.g. `"2fa_code": null`); encode defaults so the
+    // Kotlin frames match the Rust encoder byte-for-byte.
+    encodeDefaults = true
+}
 
-    override fun hashCode(): Int {
-        var result = correlationId.hashCode()
-        result = 31 * result + command.hashCode()
-        result = 31 * result + payload.contentHashCode()
-        result = 31 * result + timestamp.hashCode()
-        return result
-    }
+/** Commands sent to the native service. Wire format must match `protocol.rs`'s `Command`. */
+@Serializable
+internal sealed class IpcCommand {
+    /** Heartbeat probe. Expects [IpcEvent.Pong]. */
+    @Serializable @SerialName("PING") data object Ping : IpcCommand()
+
+    /** One-time Apple ID activation. [twoFaCode] is present on the 2FA round trip. */
+    @Serializable
+    @SerialName("ACTIVATE")
+    data class Activate(
+            @SerialName("apple_id") val appleId: String,
+            val password: String,
+            @SerialName("2fa_code") val twoFaCode: String? = null,
+    ) : IpcCommand()
+
+    /** Send an outgoing iMessage. */
+    @Serializable
+    @SerialName("SEND_MESSAGE")
+    data class SendMessage(
+            @SerialName("message_id") val messageId: String,
+            val recipients: List<String>,
+            val text: String,
+            val attachments: List<String> = emptyList(),
+    ) : IpcCommand()
+
+    /** Fetch messages received since [since] (Unix epoch milliseconds). */
+    @Serializable @SerialName("GET_MESSAGES") data class GetMessages(val since: Long) : IpcCommand()
+}
+
+/** Events received from the native service. Wire format must match `protocol.rs`'s `Event`. */
+@Serializable
+internal sealed class IpcEvent {
+    /** Heartbeat reply to [IpcCommand.Ping]. */
+    @Serializable @SerialName("PONG") data object Pong : IpcEvent()
+
+    /** Progress of an in-flight activation. */
+    @Serializable
+    @SerialName("ACTIVATION_STATUS")
+    data class ActivationStatusEvent(
+            val status: String,
+            val handles: List<String>? = null,
+    ) : IpcEvent()
+
+    /** An outgoing message was accepted for delivery. */
+    @Serializable
+    @SerialName("ACK")
+    data class Ack(@SerialName("message_id") val messageId: String) : IpcEvent()
+
+    /** A command failed or is not yet supported. */
+    @Serializable @SerialName("ERROR") data class Error(val message: String) : IpcEvent()
 }
 
 /** Backoff policy for socket reconnection attempts (reuses RelayService pattern). */
@@ -553,26 +464,6 @@ data class ReconnectPolicy(
     /** Check if retry is allowed for a given attempt. */
     fun shouldRetry(attempt: Int): Boolean = attempt < maxAttempts
 }
-
-/** DTOs for JSON serialization (length-prefixed IPC frames). */
-@Serializable
-internal data class IpcMessageDto(
-        val correlation_id: String,
-        val command: String,
-        val payload: String, // base64 or raw string depending on command
-        val timestamp: Long,
-)
-
-@Serializable internal data class RegisterHardwareResponseDto(val device_id: String)
-
-@Serializable
-internal data class ActivationStatusDto(
-        val status: String, // "activated" | "pending" | "failed"
-        val public_key: String? = null, // base64-encoded RSA public key (if activated)
-        val attempt: Int? = null,
-        val next_poll_in: Long? = null,
-        val error: String? = null,
-)
 
 /** Convert 4-byte array to big-endian Int. */
 private fun ByteArray.toInt(): Int {

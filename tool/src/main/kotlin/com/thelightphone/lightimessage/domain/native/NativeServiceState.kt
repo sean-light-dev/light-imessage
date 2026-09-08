@@ -29,28 +29,9 @@ sealed class NativeServiceState {
 }
 
 /**
- * Activation status response from native service. Represents the result of polling for hardware
- * activation.
+ * Activation progress reported by the native service's `ACTIVATION_STATUS` event.
+ *
+ * [status] is service-defined: "pending" while activation is in flight, "activated" (with
+ * [handles] populated) on success, "failed" on terminal failure.
  */
-sealed class ActivationStatus {
-    /**
-     * Hardware is activated and ready for use.
-     * @param deviceId Unique device identifier from native service
-     * @param publicKey RSA public key for device
-     */
-    data class Activated(val deviceId: String, val publicKey: java.security.PublicKey) :
-        ActivationStatus()
-
-    /**
-     * Hardware activation is pending. Caller should retry after nextPollIn milliseconds.
-     * @param attempt Current poll attempt number
-     * @param nextPollIn Milliseconds until next recommended poll
-     */
-    data class Pending(val attempt: Int, val nextPollIn: Long) : ActivationStatus()
-
-    /**
-     * Activation failed permanently.
-     * @param error Human-readable error message
-     */
-    data class Failed(val error: String) : ActivationStatus()
-}
+data class ActivationStatus(val status: String, val handles: List<String>? = null)
