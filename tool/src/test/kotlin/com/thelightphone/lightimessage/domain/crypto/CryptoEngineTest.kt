@@ -1,10 +1,15 @@
 package com.thelightphone.lightimessage.domain.crypto
 
-import com.thelightphone.lightimessage.testing.TestCertificate
+import java.math.BigInteger
 import java.security.PublicKey
 import java.security.cert.X509Certificate
-import kotlin.test.*
-import kotlin.test.Test
+import java.util.Date
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
+import org.junit.Assert.*
+import org.junit.Test
 
 /**
  * Comprehensive unit tests for CryptoEngine. Covers AES-256-GCM encryption/decryption,
@@ -18,16 +23,16 @@ class CryptoEngineTest {
     @Test
     fun testGenerateAesKey() {
         val key = cryptoEngine.generateAesKey()
-        assertNotNull(key, "Key must not be null")
-        assertEquals("AES", key.algorithm, "Key algorithm must be AES")
-        assertEquals(256, key.encoded.size * 8, "Key size must be 256 bits (32 bytes)")
+        assertNotNull("Key must not be null", key)
+        assertEquals("Key algorithm must be AES", "AES", key.algorithm)
+        assertEquals("Key size must be 256 bits (32 bytes)", 256, key.encoded.size * 8)
     }
 
     @Test
     fun testGenerateAesKeyUniqueness() {
         val key1 = cryptoEngine.generateAesKey()
         val key2 = cryptoEngine.generateAesKey()
-        assertFalse(key1.encoded.contentEquals(key2.encoded), "Generated keys must be unique")
+        assertFalse("Generated keys must be unique", key1.encoded.contentEquals(key2.encoded))
     }
 
     // ========== AES-256-GCM Encryption/Decryption ==========
@@ -38,9 +43,9 @@ class CryptoEngineTest {
         val plaintext = "Hello, World!".toByteArray(Charsets.UTF_8)
 
         val encryptResult = cryptoEngine.aesGcmEncrypt(plaintext, key, null).getOrThrow()
-        assertNotNull(encryptResult, "Encryption result must not be null")
-        assertEquals(12, encryptResult.iv.size, "IV must be 12 bytes")
-        assertEquals(16, encryptResult.authTag.size, "Auth tag must be 16 bytes")
+        assertNotNull("Encryption result must not be null", encryptResult)
+        assertEquals("IV must be 12 bytes", 12, encryptResult.iv.size)
+        assertEquals("Auth tag must be 16 bytes", 16, encryptResult.authTag.size)
 
         val decryptResult =
                 cryptoEngine.aesGcmDecrypt(
@@ -50,11 +55,11 @@ class CryptoEngineTest {
                         encryptResult.authTag,
                         null,
                 )
-        assertTrue(decryptResult.isSuccess, "Decryption must succeed")
-        assertContentEquals(
-            plaintext,
-            decryptResult.getOrNull(),
-            "Decrypted plaintext must match original",
+        assertTrue("Decryption must succeed", decryptResult.isSuccess)
+        assertArrayEquals(
+                "Decrypted plaintext must match original",
+                plaintext,
+                decryptResult.getOrNull(),
         )
     }
 
@@ -73,11 +78,11 @@ class CryptoEngineTest {
                         null,
                 )
 
-        assertTrue(decryptResult.isSuccess, "Decryption must succeed")
-        assertContentEquals(
-            plaintext,
-            decryptResult.getOrNull(),
-            "Decrypted plaintext must match original",
+        assertTrue("Decryption must succeed", decryptResult.isSuccess)
+        assertArrayEquals(
+                "Decrypted plaintext must match original",
+                plaintext,
+                decryptResult.getOrNull(),
         )
     }
 
@@ -96,8 +101,8 @@ class CryptoEngineTest {
                         null,
                 )
 
-        assertTrue(decryptResult.isSuccess, "Decryption of empty plaintext must succeed")
-        assertEquals(0, decryptResult.getOrNull()?.size, "Decrypted empty plaintext must match")
+        assertTrue("Decryption of empty plaintext must succeed", decryptResult.isSuccess)
+        assertEquals("Decrypted empty plaintext must match", 0, decryptResult.getOrNull()?.size)
     }
 
     @Test
@@ -115,11 +120,11 @@ class CryptoEngineTest {
                         null,
                 )
 
-        assertTrue(decryptResult.isSuccess, "Decryption of large plaintext must succeed")
-        assertContentEquals(
-            plaintext,
-            decryptResult.getOrNull(),
-            "Decrypted large plaintext must match original",
+        assertTrue("Decryption of large plaintext must succeed", decryptResult.isSuccess)
+        assertArrayEquals(
+                "Decrypted large plaintext must match original",
+                plaintext,
+                decryptResult.getOrNull(),
         )
     }
 
@@ -139,11 +144,11 @@ class CryptoEngineTest {
                         aad,
                 )
 
-        assertTrue(decryptResult.isSuccess, "Decryption with matching AAD must succeed")
-        assertContentEquals(
-            plaintext,
-            decryptResult.getOrNull(),
-            "Decrypted plaintext must match original",
+        assertTrue("Decryption with matching AAD must succeed", decryptResult.isSuccess)
+        assertArrayEquals(
+                "Decrypted plaintext must match original",
+                plaintext,
+                decryptResult.getOrNull(),
         )
     }
 
@@ -169,7 +174,7 @@ class CryptoEngineTest {
                         null,
                 )
 
-        assertTrue(decryptResult.isFailure, "Decryption with corrupted tag must fail")
+        assertTrue("Decryption with corrupted tag must fail", decryptResult.isFailure)
     }
 
     @Test
@@ -189,7 +194,7 @@ class CryptoEngineTest {
                         wrongAAD,
                 )
 
-        assertTrue(decryptResult.isFailure, "Decryption with wrong AAD must fail")
+        assertTrue("Decryption with wrong AAD must fail", decryptResult.isFailure)
     }
 
     @Test
@@ -214,7 +219,7 @@ class CryptoEngineTest {
                         null,
                 )
 
-        assertTrue(decryptResult.isFailure, "Decryption with corrupted ciphertext must fail")
+        assertTrue("Decryption with corrupted ciphertext must fail", decryptResult.isFailure)
     }
 
     @Test
@@ -237,7 +242,7 @@ class CryptoEngineTest {
                         null,
                 )
 
-        assertTrue(decryptResult.isFailure, "Decryption with corrupted IV must fail")
+        assertTrue("Decryption with corrupted IV must fail", decryptResult.isFailure)
     }
 
     // ========== RSA-2048-OAEP Key Wrapping ==========
@@ -248,21 +253,21 @@ class CryptoEngineTest {
         val (publicKey, privateKey) = cryptoEngine.generateRsaKeyPair()
 
         val wrapResult = cryptoEngine.rsaOaepWrap(aesKey, publicKey)
-        assertTrue(wrapResult.isSuccess, "Wrapping must succeed")
+        assertTrue("Wrapping must succeed", wrapResult.isSuccess)
 
         val wrappedKey = wrapResult.getOrNull()
-        assertNotNull(wrappedKey, "Wrapped key must not be null")
-        assertFalse(wrappedKey?.isEmpty() ?: true, "Wrapped key must not be empty")
+        assertNotNull("Wrapped key must not be null", wrappedKey)
+        assertFalse("Wrapped key must not be empty", wrappedKey?.isEmpty() ?: true)
 
         val unwrapResult = cryptoEngine.rsaOaepUnwrap(wrappedKey!!, privateKey)
-        assertTrue(unwrapResult.isSuccess, "Unwrapping must succeed")
+        assertTrue("Unwrapping must succeed", unwrapResult.isSuccess)
 
         val unwrappedKey = unwrapResult.getOrNull()
-        assertNotNull(unwrappedKey, "Unwrapped key must not be null")
-        assertContentEquals(
-            aesKey.encoded,
-            unwrappedKey?.encoded,
-            "Unwrapped key must match original",
+        assertNotNull("Unwrapped key must not be null", unwrappedKey)
+        assertArrayEquals(
+                "Unwrapped key must match original",
+                aesKey.encoded,
+                unwrappedKey?.encoded,
         )
     }
 
@@ -276,17 +281,17 @@ class CryptoEngineTest {
         val wrap1 = cryptoEngine.rsaOaepWrap(key1, publicKey)
         val wrap2 = cryptoEngine.rsaOaepWrap(key2, publicKey)
 
-        assertTrue(wrap1.isSuccess, "First wrapping must succeed")
-        assertTrue(wrap2.isSuccess, "Second wrapping must succeed")
+        assertTrue("First wrapping must succeed", wrap1.isSuccess)
+        assertTrue("Second wrapping must succeed", wrap2.isSuccess)
 
         val unwrap1 = cryptoEngine.rsaOaepUnwrap(wrap1.getOrThrow(), privateKey)
         val unwrap2 = cryptoEngine.rsaOaepUnwrap(wrap2.getOrThrow(), privateKey)
 
-        assertTrue(unwrap1.isSuccess, "First unwrapping must succeed")
-        assertTrue(unwrap2.isSuccess, "Second unwrapping must succeed")
+        assertTrue("First unwrapping must succeed", unwrap1.isSuccess)
+        assertTrue("Second unwrapping must succeed", unwrap2.isSuccess)
 
-        assertContentEquals(key1.encoded, unwrap1.getOrNull()?.encoded, "First key must match")
-        assertContentEquals(key2.encoded, unwrap2.getOrNull()?.encoded, "Second key must match")
+        assertArrayEquals("First key must match", key1.encoded, unwrap1.getOrNull()?.encoded)
+        assertArrayEquals("Second key must match", key2.encoded, unwrap2.getOrNull()?.encoded)
     }
 
     @Test
@@ -298,7 +303,7 @@ class CryptoEngineTest {
         val wrappedKey = cryptoEngine.rsaOaepWrap(aesKey, publicKey1).getOrThrow()
         val unwrapResult = cryptoEngine.rsaOaepUnwrap(wrappedKey, wrongPrivateKey)
 
-        assertTrue(unwrapResult.isFailure, "Unwrapping with wrong private key must fail")
+        assertTrue("Unwrapping with wrong private key must fail", unwrapResult.isFailure)
     }
 
     @Test
@@ -315,7 +320,7 @@ class CryptoEngineTest {
         }
 
         val unwrapResult = cryptoEngine.rsaOaepUnwrap(corruptedWrappedKey, privateKey)
-        assertTrue(unwrapResult.isFailure, "Unwrapping corrupted key must fail")
+        assertTrue("Unwrapping corrupted key must fail", unwrapResult.isFailure)
     }
 
     // ========== ECDSA P-256 Signing/Verification ==========
@@ -326,17 +331,17 @@ class CryptoEngineTest {
         val (publicKey, privateKey) = cryptoEngine.generateEcdsaKeyPair()
 
         val signResult = cryptoEngine.ecdsaSign(data, privateKey)
-        assertTrue(signResult.isSuccess, "Signing must succeed")
+        assertTrue("Signing must succeed", signResult.isSuccess)
 
         val signature = signResult.getOrNull()
-        assertNotNull(signature, "Signature must not be null")
-        assertFalse(signature?.isEmpty() ?: true, "Signature must not be empty")
+        assertNotNull("Signature must not be null", signature)
+        assertFalse("Signature must not be empty", signature?.isEmpty() ?: true)
 
         // Create a self-signed certificate for verification
         val cert = createSelfSignedEcdsaCertificate(publicKey)
 
         val verifyResult = cryptoEngine.ecdsaVerify(data, signature!!, cert)
-        assertTrue(verifyResult.isSuccess, "Verification must succeed")
+        assertTrue("Verification must succeed", verifyResult.isSuccess)
     }
 
     @Test
@@ -348,7 +353,7 @@ class CryptoEngineTest {
         val cert = createSelfSignedEcdsaCertificate(publicKey)
         val verifyResult = cryptoEngine.ecdsaVerify(data, signature, cert)
 
-        assertTrue(verifyResult.isSuccess, "Verification of random data must succeed")
+        assertTrue("Verification of random data must succeed", verifyResult.isSuccess)
     }
 
     @Test
@@ -360,7 +365,7 @@ class CryptoEngineTest {
         val cert = createSelfSignedEcdsaCertificate(publicKey)
         val verifyResult = cryptoEngine.ecdsaVerify(data, signature, cert)
 
-        assertTrue(verifyResult.isSuccess, "Verification of empty data must succeed")
+        assertTrue("Verification of empty data must succeed", verifyResult.isSuccess)
     }
 
     @Test
@@ -372,7 +377,7 @@ class CryptoEngineTest {
         val cert = createSelfSignedEcdsaCertificate(publicKey)
         val verifyResult = cryptoEngine.ecdsaVerify(data, signature, cert)
 
-        assertTrue(verifyResult.isSuccess, "Verification of large data must succeed")
+        assertTrue("Verification of large data must succeed", verifyResult.isSuccess)
     }
 
     @Test
@@ -391,7 +396,7 @@ class CryptoEngineTest {
         val cert = createSelfSignedEcdsaCertificate(publicKey)
         val verifyResult = cryptoEngine.ecdsaVerify(data, corruptedSignature, cert)
 
-        assertTrue(verifyResult.isFailure, "Verification of corrupted signature must fail")
+        assertTrue("Verification of corrupted signature must fail", verifyResult.isFailure)
     }
 
     @Test
@@ -404,7 +409,7 @@ class CryptoEngineTest {
         val cert = createSelfSignedEcdsaCertificate(publicKey)
         val verifyResult = cryptoEngine.ecdsaVerify(tamperedData, signature, cert)
 
-        assertTrue(verifyResult.isFailure, "Verification with tampered data must fail")
+        assertTrue("Verification with tampered data must fail", verifyResult.isFailure)
     }
 
     @Test
@@ -418,7 +423,7 @@ class CryptoEngineTest {
         val cert = createSelfSignedEcdsaCertificate(publicKey2)
         val verifyResult = cryptoEngine.ecdsaVerify(data, signature, cert)
 
-        assertTrue(verifyResult.isFailure, "Verification with wrong public key must fail")
+        assertTrue("Verification with wrong public key must fail", verifyResult.isFailure)
     }
 
     @Test
@@ -431,8 +436,8 @@ class CryptoEngineTest {
 
         // ECDSA signatures are non-deterministic (random nonce), so signatures should differ
         assertFalse(
-            signature1.contentEquals(signature2),
-            "Multiple signatures of same data should differ (ECDSA uses random nonce)",
+                "Multiple signatures of same data should differ (ECDSA uses random nonce)",
+                signature1.contentEquals(signature2),
         )
 
         val cert = createSelfSignedEcdsaCertificate(publicKey)
@@ -440,19 +445,34 @@ class CryptoEngineTest {
         val verify1 = cryptoEngine.ecdsaVerify(data, signature1, cert)
         val verify2 = cryptoEngine.ecdsaVerify(data, signature2, cert)
 
-        assertTrue(verify1.isSuccess, "First signature must verify")
-        assertTrue(verify2.isSuccess, "Second signature must verify")
+        assertTrue("First signature must verify", verify1.isSuccess)
+        assertTrue("Second signature must verify", verify2.isSuccess)
     }
 
     // ========== Helper Functions ==========
 
     /**
-     * Creates a certificate wrapping [publicKey] for testing ECDSA verify.
+     * Creates a self-signed X509 certificate wrapping [publicKey] for testing ECDSA verify.
      *
      * Only the public key inside the cert is inspected by `CryptoEngine.ecdsaVerify`; the cert's
-     * own signature is never validated, so a stub certificate is sufficient. (The old suite
-     * generated real self-signed certs via BouncyCastle, which is unavailable in this sandbox.)
+     * own signature is not validated. We generate a fresh signing keypair so the cert is well-
+     * formed but the signature itself is not asserted to chain back to [publicKey].
+     *
+     * Uses BouncyCastle (testImpl only, not a production dep) because the previous impl relied on
+     * `sun.security.x509.*` internals that are not on the compile classpath.
      */
-    private fun createSelfSignedEcdsaCertificate(publicKey: PublicKey): X509Certificate =
-            TestCertificate(publicKey)
+    private fun createSelfSignedEcdsaCertificate(publicKey: PublicKey): X509Certificate {
+        val (_, signingPrivateKey) = cryptoEngine.generateEcdsaKeyPair()
+
+        val notBefore = Date()
+        val notAfter = Date(notBefore.time + 365L * 24 * 60 * 60 * 1000)
+        val name = X500Name("CN=test,O=test,C=US")
+        val serial = BigInteger.valueOf(System.currentTimeMillis())
+
+        val builder =
+                JcaX509v3CertificateBuilder(name, serial, notBefore, notAfter, name, publicKey)
+        val signer = JcaContentSignerBuilder("SHA256withECDSA").build(signingPrivateKey)
+        val holder = builder.build(signer)
+        return JcaX509CertificateConverter().getCertificate(holder)
+    }
 }
