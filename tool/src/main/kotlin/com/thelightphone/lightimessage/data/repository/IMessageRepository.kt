@@ -73,8 +73,9 @@ interface IMessageRepository {
     ): Result<Unit>
 
     /**
-     * Retrieves all undelivered messages (status != DELIVERED).
-     * @return Flow emitting a list of undelivered messages ordered by timestamp (oldest first)
+     * Retrieves outgoing messages eligible for send retry (status DRAFT, ENCRYPTED, or FAILED —
+     * i.e. not yet relay-acked and not DELIVERED/READ).
+     * @return Flow emitting a list of undelivered outgoing messages, oldest first
      */
     fun getUndeliveredMessages(): Flow<List<MessageEntity>>
 

@@ -36,7 +36,13 @@ interface MessageDao {
 
     @Query("SELECT * FROM messages ORDER BY timestamp DESC") fun getAll(): Flow<List<MessageEntity>>
 
-    @Query("SELECT * FROM messages WHERE status != 2 ORDER BY timestamp ASC")
+    /**
+     * Outgoing messages eligible for send retry: not yet relay-acked (2=SENT) and not in a
+     * success-terminal state (3=DELIVERED, 4=READ). Without the `isOutgoing` filter this query
+     * also matched *incoming* rows (status 0/3/4), and the background sync job would "resend"
+     * a received message back to its sender.
+     */
+    @Query("SELECT * FROM messages WHERE isOutgoing = 1 AND status NOT IN (2, 3, 4) ORDER BY timestamp ASC")
     fun getUndelivered(): Flow<List<MessageEntity>>
 
     @Query("SELECT * FROM messages WHERE readReceiptAt IS NULL ORDER BY timestamp ASC")
