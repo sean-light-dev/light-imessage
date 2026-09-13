@@ -792,7 +792,7 @@ erDiagram
 
 ## 9. Implementation Timeline
 
-> **Audit priority (2026-09):** implement in this order — (1) conversation-list metadata row layout (TASK_004), (2) composer migration to `LightEmbeddedLp3Keyboard` + send button (TASK_007), (3) unified photo/video media viewer with consistent Download/Forward, opened from generic attachment rows (TASK_008), (4) `SettingsScreen` and the remaining pending items from the migration note (TASK_009).
+> **Audit priority (2026-09):** implement in this order — (1) conversation-list metadata row layout (TASK_004), (2) composer migration to `LightEmbeddedLp3Keyboard` + send button (TASK_007), (3) unified photo/video media viewer with consistent Download/Forward, opened by tapping the generic media icon (TASK_008), (4) `SettingsScreen` and the remaining pending items from the migration note (TASK_009).
 
 ```mermaid
 gantt
