@@ -2,7 +2,7 @@
 
 > **Migration note (2026-09):** A subset of this milestone landed early during the SDK migration: `ConversationListScreen` (the tool's `@InitialScreen`; thread list from Room, tap → `navigateTo(ThreadScreen)`, plus an auth-state banner not in this spec) and a **read-only** `ThreadScreen` (message history from Room, marks the thread read on show). Both use the SDK's `LightScreen`/`LightViewModel` + `sdk:ui` components with thin ViewModels over repository Flows — there is no `uiState`/`effects` surface, no `AuthViewModel`. **Pending:** `Lp3Keyboard` composer (ADR-007 — prefer the SDK's bundled `LightEmbeddedLp3Keyboard`), send button, delivery/typing indicators, unread counters, mute/archive, `AttachmentViewer`, `SettingsScreen`/`SettingsViewModel`, 5000-char limit enforcement, accessibility/hardware-key work, and the §7 test matrix (`androidx.test` is banned in the sandbox, so UI tests need a different strategy). Component status: [../migration-status.md](../migration-status.md).
 
-> **Audit note (2026-09, screenshot review):** Layout/protocol refinements from a UX audit against screenshots of the migrated screens are folded into §3–§6: conversation rows redesigned (title + snippet + trailing timestamp, unread dot/counter, mute/archive icons), thread composer uses the bundled `LightEmbeddedLp3Keyboard` with a send button (replacing the pencil "compose" icon), and attachments render as generic placeholder rows that open a unified photo+video media viewer (no inline thumbnails) with consistent Download/Forward actions. Verified SDK primitives: `LightBottomBar`/`LightBarButton`, `LightEmbeddedLp3Keyboard` (`sdk.ui.keyboard`), `LightFullscreenModal`/`LightModalManager`. **No image/media/video viewer primitive exists in `sdk:ui` today — the media viewer sections name it as pending SDK mapping (video falls back to the media3 player available via the allowlist).**
+> **Audit note (2026-09, screenshot review):** Layout/protocol refinements from a UX audit against screenshots of the migrated screens are folded into §3–§6: conversation rows redesigned (title + snippet + trailing timestamp, unread dot/counter, mute/archive icons), thread composer uses the bundled `LightEmbeddedLp3Keyboard` with a send button (replacing the pencil "compose" icon), and attachments render as just the generic media icon (`LightIcons.MEDIA`) — no inline thumbnails, no metadata — opening a unified photo+video media viewer with consistent Download/Forward actions. Verified SDK primitives: `LightBottomBar`/`LightBarButton`, `LightEmbeddedLp3Keyboard` (`sdk.ui.keyboard`), `LightFullscreenModal`/`LightModalManager`. **No image/media/video viewer primitive exists in `sdk:ui` today — the media viewer sections name it as pending SDK mapping (video falls back to the media3 player available via the allowlist).**
 
 ## 1. Formal Requirement Restatement
 
@@ -14,7 +14,7 @@ This specification builds on the rustpush-native architecture established in the
 
 - `ConversationListScreen`: E-Ink list of threads with snippet, timestamp, unread counter, and mute/archive indicators.
 - `ThreadScreen`: scrollable message history, `LightEmbeddedLp3Keyboard` composer with send button, per-message read-receipt and delivery-status indicators, and typing indicator rendered as a subtle row above the composer.
-- `UnifiedMediaViewer`: generic attachment rows (no inline thumbnails) and a unified photo/video full-screen viewer.
+- `UnifiedMediaViewer`: a generic media icon (`LightIcons.MEDIA`) per attachment (no inline thumbnails, no metadata) and a unified photo/video full-screen viewer.
 - `SettingsScreen`: account status, logout, notification preferences, and relay info display.
 - `LightScreen` navigation integration: `navigateTo`, `onBackPressed`, and screen result routing.
 - `SettingsViewModel` exposing preferences and account actions.
@@ -27,7 +27,7 @@ This specification builds on the rustpush-native architecture established in the
 - `rustpush` native service implementation (Milestone 3).
 - Apple ID authentication logic and session persistence (Milestone 4).
 - Messaging service, repositories, and business logic (Milestone 5).
-- Full attachment upload/download pipeline (Milestone 5 covers scheduling; UI displays metadata only, no thumbnails).
+- Full attachment upload/download pipeline (Milestone 5 covers scheduling; UI shows only a generic media icon per attachment).
 - SMS/MMS fallback, FaceTime, and iMessage app extensions.
 - Custom keyboard implementation beyond integrating the provided `LightEmbeddedLp3Keyboard` composable.
 
@@ -55,6 +55,7 @@ This specification builds on the rustpush-native architecture established in the
 - `LightEmbeddedLp3Keyboard` is the only text input component used in `ThreadScreen`.
 - Navigation commands are issued only through `LightScreen` APIs (`navigateTo`, `onBackPressed`).
 - UI state is derived from `StateFlow`/`Flow` exposed by ViewModels; screens do not perform business logic.
+- All icons come from the SDK's `LightIcons` set (`sdk/ui`); tools do not ship custom drawables.
 - Outgoing messages are not sent until the user explicitly taps the send button.
 - Attachment viewer displays only downloaded attachments; pending downloads show placeholder.
 - Settings screen must confirm logout with a destructive-action dialog before invoking `AppleIdAuth.logout()`.
@@ -317,21 +318,21 @@ classDiagram
 
 **Module boundaries:**
 
-| Component                   | Responsibility                                                                                                                                                                                                                 | Owned By                          |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
-| `ConversationListViewModel` | Expose thread list UI state and effects; map repository data to UI models.                                                                                                                                                     | UI & Presentation bounded context |
-| `ThreadViewModel`           | Expose message list UI state, send, draft, mark-read, and typing actions.                                                                                                                                                      | UI & Presentation bounded context |
-| `SettingsViewModel`         | Expose settings UI state, account status, and logout confirmation flow.                                                                                                                                                        | UI & Presentation bounded context |
-| `AuthViewModel`             | Map `AuthState` to `AuthUiState` and emit one-time `AuthEffect` events.                                                                                                                                                        | UI & Presentation bounded context |
-| `ConversationListScreen`    | Render thread rows (title + snippet + trailing timestamp, unread dot/counter, mute/archive icons) and explicitly labeled bottom bar actions.                                                                                   | UI & Presentation bounded context |
-| `ThreadScreen`              | Render message history, per-message status indicators, `LightEmbeddedLp3Keyboard` composer + send button, and typing row.                                                                                                      | UI & Presentation bounded context |
-| `UnifiedMediaViewer`        | Render generic attachment rows (no inline thumbnails) and a unified photo/video full-screen viewer with consistent Download/Forward actions. _(No image/video primitive exists in `sdk:ui` yet — map at implementation time.)_ | UI & Presentation bounded context |
-| `SettingsScreen`            | Render account status, preferences, and logout confirmation.                                                                                                                                                                   | UI & Presentation bounded context |
-| `LoginScreen`               | Capture Apple ID and password; display validation errors.                                                                                                                                                                      | UI & Presentation bounded context |
-| `TwoFactorScreen`           | Capture 6-digit 2FA code; support resend.                                                                                                                                                                                      | UI & Presentation bounded context |
-| `LightScreenHost`           | Host `LightScreen` navigation and route between auth, list, thread, settings.                                                                                                                                                  | UI & Presentation bounded context |
-| `SettingsRepository`        | Persist simple settings in `DataStore`.                                                                                                                                                                                        | UI & Presentation bounded context |
-| `LightEmbeddedLp3Keyboard`  | Embedded composer from `sdk:ui` (`sdk.ui.keyboard`); send handled via callback.                                                                                                                                                | External dependency               |
+| Component                   | Responsibility                                                                                                                                                                                                                                                                 | Owned By                          |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
+| `ConversationListViewModel` | Expose thread list UI state and effects; map repository data to UI models.                                                                                                                                                                                                     | UI & Presentation bounded context |
+| `ThreadViewModel`           | Expose message list UI state, send, draft, mark-read, and typing actions.                                                                                                                                                                                                      | UI & Presentation bounded context |
+| `SettingsViewModel`         | Expose settings UI state, account status, and logout confirmation flow.                                                                                                                                                                                                        | UI & Presentation bounded context |
+| `AuthViewModel`             | Map `AuthState` to `AuthUiState` and emit one-time `AuthEffect` events.                                                                                                                                                                                                        | UI & Presentation bounded context |
+| `ConversationListScreen`    | Render thread rows (title + snippet + trailing timestamp, unread dot/counter, mute/archive icons) and explicitly labeled bottom bar actions.                                                                                                                                   | UI & Presentation bounded context |
+| `ThreadScreen`              | Render message history, per-message status indicators, `LightEmbeddedLp3Keyboard` composer + send button, and typing row.                                                                                                                                                      | UI & Presentation bounded context |
+| `UnifiedMediaViewer`        | Render one generic media icon (`LightIcons.MEDIA`) per attachment (no inline thumbnails, no metadata) and a unified photo/video full-screen viewer with consistent Download/Forward actions. _(No image/video primitive exists in `sdk:ui` yet — map at implementation time.)_ | UI & Presentation bounded context |
+| `SettingsScreen`            | Render account status, preferences, and logout confirmation.                                                                                                                                                                                                                   | UI & Presentation bounded context |
+| `LoginScreen`               | Capture Apple ID and password; display validation errors.                                                                                                                                                                                                                      | UI & Presentation bounded context |
+| `TwoFactorScreen`           | Capture 6-digit 2FA code; support resend.                                                                                                                                                                                                                                      | UI & Presentation bounded context |
+| `LightScreenHost`           | Host `LightScreen` navigation and route between auth, list, thread, settings.                                                                                                                                                                                                  | UI & Presentation bounded context |
+| `SettingsRepository`        | Persist simple settings in `DataStore`.                                                                                                                                                                                                                                        | UI & Presentation bounded context |
+| `LightEmbeddedLp3Keyboard`  | Embedded composer from `sdk:ui` (`sdk.ui.keyboard`); send handled via callback.                                                                                                                                                                                                | External dependency               |
 
 ---
 
@@ -446,7 +447,7 @@ sequenceDiagram
     participant TVM as ThreadViewModel
     participant AM as AttachmentManager
 
-    U->>+TS: tap attachment row
+    U->>+TS: tap attachment icon
     TS->>+TVM: onAttachmentClick(attachmentId)
     TVM->>+AM: scheduleDownload(attachmentId)
     AM-->>-TVM: Result.success
@@ -630,13 +631,13 @@ flowchart TD
     Status --> Attachments{attachmentCount > 0?}
     Bold --> Attachments
     Normal --> Attachments
-    Attachments -->|Yes| ShowRow[Render generic attachment row (icon + filename/size); tap opens UnifiedMediaViewer.FullScreen]
+    Attachments -->|Yes| ShowRow[Render generic media icon (LightIcons.MEDIA); tap opens UnifiedMediaViewer.FullScreen]
     Attachments -->|No| ShowText[Show text body]
     ShowRow --> End([End])
     ShowText --> End
 ```
 
-Modified per audit: no inline thumbnails — attachments render as a generic placeholder row in the message list; tapping the row routes to the unified media viewer (SDK image primitive — pending mapping).
+Modified per audit: no inline thumbnails and no metadata — each attachment renders as just the generic media icon (`LightIcons.MEDIA`); tapping it routes to the unified media viewer (SDK image primitive — pending mapping).
 
 ### 6.3 Send Button Enablement
 
@@ -712,7 +713,7 @@ flowchart TD
 | Empty thread list                                 | No threads in DB                     | Show empty state with new-message hint                           | No crash               |
 | Very long message                                 | 5001 characters typed                | `LightEmbeddedLp3Keyboard` truncates to 5000; send disabled if 0 | Length limit           |
 | Send while offline                                | `MessagingService.sendMessage` fails | Show failed state; allow retry                                   | No duplicate sends     |
-| Attachment not downloaded                         | Tap pending attachment row           | Show placeholder; schedule download                              | No crash               |
+| Attachment not downloaded                         | Tap pending attachment icon          | Show placeholder; schedule download                              | No crash               |
 | Logout cancelled                                  | User taps cancel in dialog           | Dialog dismissed; stay in settings                               | No accidental logout   |
 | Settings load failure                             | DataStore read error                 | Show error state; retry available                                | Robustness             |
 | Back pressed on thread                            | Hardware back button                 | Return to conversation list                                      | Navigation consistency |
@@ -734,6 +735,7 @@ flowchart TD
 | Logout requires confirmation                    | `SettingsScreen` + `SettingsViewModel`                                           | Dialog shown before `AppleIdAuth.logout`                   |
 | Outgoing send requires explicit action          | `ThreadScreen`                                                                   | Send button click test; no auto-send on draft change       |
 | Media viewer only for downloaded                | `UnifiedMediaViewer`                                                             | Pending attachments show placeholder, not viewer           |
+| All icons from `LightIcons`                     | All screens                                                                      | No custom drawables under `tool/src/main/res`              |
 
 ---
 
@@ -866,7 +868,8 @@ gantt
 
 ## 10. Revision History
 
-| Version | Date       | Author                  | Change                                                                                                                                                                                                                                                                                                                                                 |
-| ------- | ---------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1.0     | 2026-07-18 | Specification Architect | Initial Milestone 6 implementation-ready specification for the UI & Keyboard layer based on the rustpush-native architecture and prior milestones.                                                                                                                                                                                                     |
-| 1.1     | 2026-09-12 | Specification Architect | Fold in the 2026-09 screenshot audit: metadata row layout, `LightEmbeddedLp3Keyboard` composer + send button, generic attachment rows (no inline thumbnails), unified photo/video media viewer; renamed `AttachmentViewer` → `UnifiedMediaViewer`; flagged the missing `sdk:ui` media primitive as pending mapping; audit-priority ordering for tasks. |
+| Version | Date       | Author                  | Change                                                                                                                                                                                                                                                                                                 |
+| ------- | ---------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1.0     | 2026-07-18 | Specification Architect | Initial Milestone 6 implementation-ready specification for the UI & Keyboard layer based on the rustpush-native architecture and prior milestones.                                                                                                                                                     |
+| 1.1     | 2026-09-12 | Specification Architect | Fold in the 2026-09 screenshot audit: metadata row layout, `LightEmbeddedLp3Keyboard` composer + send button, unified photo/video media viewer; renamed `AttachmentViewer` → `UnifiedMediaViewer`; flagged the missing `sdk:ui` media primitive as pending mapping; audit-priority ordering for tasks. |
+| 1.2     | 2026-09-12 | Specification Architect | Attachment affordance reduced to just the generic media icon (`LightIcons.MEDIA`) — no inline thumbnails, no filename/size metadata; added the all-icons-from-`LightIcons` invariant and invariant-check row.                                                                                          |
