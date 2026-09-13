@@ -50,3 +50,4 @@ bin/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.scratch/
