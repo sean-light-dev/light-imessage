@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Standalone rustpush IPC service for the LightOS iMessage client (Milestone 3)"
 
+[lib]
+name = "rustpush_service"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
 [[bin]]
 name = "rustpush-service"
 path = "src/main.rs"

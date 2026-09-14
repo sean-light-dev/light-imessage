@@ -28,7 +28,12 @@ tool-lint:
 tool-test:
   ./gradlew :tool:test --stacktrace
 
-# Build Light Page APK
+# Build rustpush native service for Android arm64-v8a
+[group('build')]
+rust-build:
+  ./gradlew :native-service:buildRustService --stacktrace
+
+# Build Light Page APK, including the rustpush arm64 native library
 [group('build')]
 tool-build:
   ./gradlew :tool:assembleDebug --stacktrace
