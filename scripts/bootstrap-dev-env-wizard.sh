@@ -219,7 +219,8 @@ resolve_bin() {
   fi
 }
 
-TOTAL_STAGES=9
+NDK_VERSION="25.2.9519653"
+TOTAL_STAGES=10
 
 banner "Light SDK CLI-only bootstrap"
 
@@ -352,12 +353,50 @@ else
       "platform-tools" \
       "emulator" \
       "platforms;android-34" \
+      "ndk;$NDK_VERSION" \
       "$SYSTEM_IMAGE_PACKAGE"; then
-    say "Installed platform-tools, emulator, android-34 platform, and system image."
+    ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
+    export ANDROID_NDK_HOME
+    write_env ANDROID_NDK_HOME "$ANDROID_NDK_HOME"
+    append_line_if_missing "$PROFILE_FILE" "export ANDROID_NDK_HOME=\"$ANDROID_NDK_HOME\""
+    say "Installed platform-tools, emulator, NDK $NDK_VERSION, android-34 platform, and system image."
   else
     warn "sdkmanager install failed."
     SKIPPED+=("Install SDK packages via sdkmanager")
   fi
+fi
+
+stage "Install Rust Android build tools"
+if ! command -v cargo >/dev/null 2>&1; then
+  warn "cargo not found. Install Rust with rustup, then re-run this wizard."
+  open_url "https://rustup.rs/"
+  SKIPPED+=("Install Rust/cargo with rustup")
+else
+  say "Found: $(cargo --version)"
+  if command -v rustup >/dev/null 2>&1 && rustup target list --installed | grep -qx "aarch64-linux-android"; then
+    say "Found Rust target: aarch64-linux-android"
+  elif command -v rustup >/dev/null 2>&1 && rustup target add aarch64-linux-android; then
+    say "Installed Rust target: aarch64-linux-android"
+  else
+    warn "Could not install Rust target aarch64-linux-android."
+    SKIPPED+=("Install Rust target aarch64-linux-android")
+  fi
+
+  if command -v cargo-ndk >/dev/null 2>&1; then
+    say "Found: $(cargo ndk --version 2>/dev/null || cargo-ndk --version)"
+  elif cargo install cargo-ndk --locked; then
+    say "Installed cargo-ndk."
+  else
+    warn "Could not install cargo-ndk."
+    SKIPPED+=("Install cargo-ndk with cargo install cargo-ndk --locked")
+  fi
+fi
+
+if [[ -n "${ANDROID_NDK_HOME:-}" && -d "$ANDROID_NDK_HOME" ]]; then
+  say "Verified Android NDK: $ANDROID_NDK_HOME"
+else
+  warn "Android NDK $NDK_VERSION is not available under $ANDROID_SDK_ROOT/ndk."
+  SKIPPED+=("Install Android NDK $NDK_VERSION and set ANDROID_NDK_HOME")
 fi
 
 stage "Create AVD with avdmanager"

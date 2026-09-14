@@ -5,12 +5,14 @@ import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.InputDirectory
 import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
+import java.io.File
 import javax.inject.Inject
 
 plugins {
@@ -34,13 +36,41 @@ abstract class BuildRustServiceTask @Inject constructor(
     @get:Internal
     abstract val cargoNdk: Property<String>
 
+    @get:Input
+    abstract val ndkVersion: Property<String>
+
     @TaskAction
     fun build() {
         val output = outputDirectory.get().asFile
         output.deleteRecursively()
         output.mkdirs()
+        val sdkCandidates = mutableListOf<File>()
+        listOf(System.getenv("ANDROID_SDK_ROOT"), System.getenv("ANDROID_HOME"))
+            .filterNotNull()
+            .mapTo(sdkCandidates) { File(it) }
+        val localProperties = rustDirectory.get().asFile.resolve("../local.properties")
+        if (localProperties.isFile) {
+            localProperties.readLines()
+                .firstOrNull { it.startsWith("sdk.dir=") }
+                ?.substringAfter("=")
+                ?.replace("\\:", ":")
+                ?.let { sdkCandidates.add(File(it)) }
+        }
+        val sdkDirectory = sdkCandidates.firstOrNull { it.isDirectory }
+            ?: throw GradleException("Android SDK not found; run scripts/bootstrap-dev-env-wizard.sh")
+        val ndkDirectory = sdkDirectory.resolve("ndk/${ndkVersion.get()}")
+        if (!ndkDirectory.isDirectory) {
+            throw GradleException(
+                "Android NDK ${ndkVersion.get()} not found at $ndkDirectory; " +
+                    "run scripts/bootstrap-dev-env-wizard.sh"
+            )
+        }
+
         execOperations.exec {
             workingDir(rustDirectory.get().asFile)
+            environment("ANDROID_SDK_ROOT", sdkDirectory.absolutePath)
+            environment("ANDROID_NDK_HOME", ndkDirectory.absolutePath)
+            environment("ANDROID_NDK_ROOT", ndkDirectory.absolutePath)
             commandLine(cargoNdk.get(), "ndk", "-t", "arm64-v8a", "-o", output.absolutePath, "build", "--release")
         }
         val library = output.resolve("arm64-v8a/librustpush_service.so")
@@ -57,6 +87,7 @@ tasks.register<BuildRustServiceTask>("buildRustService") {
     manifest.set(layout.projectDirectory.file("Cargo.toml"))
     outputDirectory.set(layout.buildDirectory.dir("rust/jniLibs"))
     cargoNdk.set(providers.gradleProperty("cargoNdk").orElse("cargo"))
+    ndkVersion.set("25.2.9519653")
 }
 
 android {
