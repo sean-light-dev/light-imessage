@@ -132,7 +132,7 @@ write_env() {
   touch "$ENV_FILE"
   tmp=$(mktemp)
   grep -vE "^${key}=" "$ENV_FILE" > "$tmp" || true
-  printf '%s=%s\n' "$key" "$value" >> "$tmp"
+  printf '%s=%q\n' "$key" "$value" >> "$tmp"
   mv "$tmp" "$ENV_FILE"
   WRITTEN_ENV+=("$key")
   printf '  %s✓ wrote%s %s → %s\n' "$GREEN" "$RESET" "$key" "$ENV_FILE"
@@ -390,6 +390,39 @@ else
     warn "Could not install cargo-ndk."
     SKIPPED+=("Install cargo-ndk with cargo install cargo-ndk --locked")
   fi
+fi
+
+if command -v protoc >/dev/null 2>&1; then
+  say "Found: $(protoc --version)"
+elif command -v brew >/dev/null 2>&1 && brew install protobuf; then
+  say "Installed protobuf/protoc."
+else
+  warn "protoc not found. Install protobuf (for example: brew install protobuf)."
+  SKIPPED+=("Install protobuf/protoc")
+fi
+
+FAIRPLAY_SOURCE="rustpush/certs/legacy-fairplay"
+FAIRPLAY_TARGET="rustpush/certs/fairplay"
+if [[ -f "$FAIRPLAY_SOURCE/fairplay.crt" && -f "$FAIRPLAY_SOURCE/fairplay.pem" ]]; then
+  mkdir -p "$FAIRPLAY_TARGET"
+  for FAIRPLAY_NAME in \
+    4056631661436364584235346952193 \
+    4056631661436364584235346952194 \
+    4056631661436364584235346952195 \
+    4056631661436364584235346952196 \
+    4056631661436364584235346952197 \
+    4056631661436364584235346952198 \
+    4056631661436364584235346952199 \
+    4056631661436364584235346952200 \
+    4056631661436364584235346952201 \
+    4056631661436364584235346952208; do
+    cp "$FAIRPLAY_SOURCE/fairplay.crt" "$FAIRPLAY_TARGET/$FAIRPLAY_NAME.crt"
+    cp "$FAIRPLAY_SOURCE/fairplay.pem" "$FAIRPLAY_TARGET/$FAIRPLAY_NAME.pem"
+  done
+  say "Prepared rustpush FairPlay build fixtures."
+else
+  warn "rustpush FairPlay fixtures are missing; initialize submodules recursively."
+  SKIPPED+=("Run git submodule update --init --recursive")
 fi
 
 if [[ -n "${ANDROID_NDK_HOME:-}" && -d "$ANDROID_NDK_HOME" ]]; then

@@ -1,10 +1,9 @@
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
+import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
-import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.Property
-import org.gradle.api.tasks.InputDirectory
-import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.InputFiles
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.OutputDirectory
@@ -22,13 +21,12 @@ plugins {
 abstract class BuildRustServiceTask @Inject constructor(
     private val execOperations: ExecOperations,
 ) : DefaultTask() {
-    @get:InputDirectory
-    @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:Internal
     abstract val rustDirectory: DirectoryProperty
 
-    @get:InputFile
+    @get:InputFiles
     @get:PathSensitive(PathSensitivity.RELATIVE)
-    abstract val manifest: RegularFileProperty
+    abstract val rustInputs: ConfigurableFileCollection
 
     @get:OutputDirectory
     abstract val outputDirectory: DirectoryProperty
@@ -41,6 +39,33 @@ abstract class BuildRustServiceTask @Inject constructor(
 
     @TaskAction
     fun build() {
+        val rustpushDirectory = rustDirectory.get().asFile.resolve("../rustpush")
+        val legacyFairplay = rustpushDirectory.resolve("certs/legacy-fairplay")
+        val fairplayDirectory = rustpushDirectory.resolve("certs/fairplay")
+        val fairplayNames = listOf(
+            "4056631661436364584235346952193",
+            "4056631661436364584235346952194",
+            "4056631661436364584235346952195",
+            "4056631661436364584235346952196",
+            "4056631661436364584235346952197",
+            "4056631661436364584235346952198",
+            "4056631661436364584235346952199",
+            "4056631661436364584235346952200",
+            "4056631661436364584235346952201",
+            "4056631661436364584235346952208",
+        )
+        val legacyCertificate = legacyFairplay.resolve("fairplay.crt")
+        val legacyKey = legacyFairplay.resolve("fairplay.pem")
+        if (!legacyCertificate.isFile || !legacyKey.isFile) {
+            throw GradleException("rustpush FairPlay fixtures are missing at $legacyFairplay")
+        }
+        fairplayDirectory.mkdirs()
+        fairplayNames.forEach { name ->
+            legacyCertificate.copyTo(fairplayDirectory.resolve("$name.crt"), overwrite = true)
+            legacyKey.copyTo(fairplayDirectory.resolve("$name.pem"), overwrite = true)
+        }
+
+
         val output = outputDirectory.get().asFile
         output.deleteRecursively()
         output.mkdirs()
@@ -84,7 +109,7 @@ tasks.register<BuildRustServiceTask>("buildRustService") {
     group = "build"
     description = "Cross-compiles rustpush-service for Android arm64-v8a with cargo-ndk."
     rustDirectory.set(layout.projectDirectory)
-    manifest.set(layout.projectDirectory.file("Cargo.toml"))
+    rustInputs.from(layout.projectDirectory.file("Cargo.toml"), layout.projectDirectory.file("Cargo.lock"), layout.projectDirectory.dir("src"), layout.projectDirectory.dir("../rustpush"))
     outputDirectory.set(layout.buildDirectory.dir("rust/jniLibs"))
     cargoNdk.set(providers.gradleProperty("cargoNdk").orElse("cargo"))
     ndkVersion.set("25.2.9519653")
