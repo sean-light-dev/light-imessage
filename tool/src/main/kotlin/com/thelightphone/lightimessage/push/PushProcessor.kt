@@ -4,6 +4,7 @@ import android.util.Base64
 import android.util.Log
 import androidx.room.withTransaction
 import com.thelightphone.lightimessage.data.database.ImessageDatabase
+import com.thelightphone.lightimessage.data.datastore.IPushRegistrationRepository
 import com.thelightphone.lightimessage.data.entity.IncomingPushEntity
 import com.thelightphone.lightimessage.data.entity.MessageEntity
 import com.thelightphone.lightimessage.data.entity.ThreadEntity
@@ -49,23 +50,39 @@ class PushProcessor(
         private val database: ImessageDatabase,
         private val messageCodec: IMessageCodec,
         private val authManager: AuthManager? = null,
-        private val codecKeysProvider: () -> CodecKeys?,
+        private val codecKeysProvider: suspend () -> CodecKeys?,
         private val pushRepository: IPushProcessingRepository? = null,
+        private val pushRegistrationRepository: IPushRegistrationRepository? = null,
+        private val backgroundSync: suspend () -> Unit = {},
+        private val typingIndicator: suspend (threadId: String, sender: String) -> Unit =
+                { threadId, sender ->
+                    TypingIndicatorSurface.show(threadId, sender)
+                },
+        private val transaction: suspend (suspend () -> Unit) -> Unit = { block ->
+            database.withTransaction(block)
+        },
 ) {
     /**
      * Entry point for a raw push payload (bytes as delivered by UnifiedPush).
      *
      * @return true if the payload was handled (persisted or a known duplicate); false on failure.
      */
-    suspend fun process(rawPayload: ByteArray): Boolean {
+    suspend fun process(
+            rawPayload: ByteArray,
+            distributorInstance: String = DEFAULT_DISTRIBUTOR_INSTANCE,
+    ): Boolean {
         val pushMessage =
                 try {
                     parsePushPayload(String(rawPayload, Charsets.UTF_8))
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to parse push payload: ${e.message}", e)
-                    return false
+                    return recordUnparsedPush(
+                            rawPayload,
+                            distributorInstance,
+                            e.message ?: "Invalid push payload"
+                    )
                 }
-        return process(pushMessage)
+        return process(pushMessage, distributorInstance = distributorInstance)
     }
 
     /** Process a parsed push message. Idempotent: duplicate messageIds are dropped. */
@@ -76,11 +93,29 @@ class PushProcessor(
     ): Boolean {
         Log.d(TAG, "Processing push: messageId=${push.messageId}, sender=${push.sender}")
 
+        if (pushRegistrationRepository != null) {
+            val registration = pushRegistrationRepository.getRegistration(distributorInstance)
+            if (registration == null) {
+                Log.w(
+                        TAG,
+                        "Rejecting push ${push.messageId}: no registration for instance $distributorInstance"
+                )
+                return false
+            }
+            if (push.distributorToken == null || push.distributorToken != registration.token) {
+                Log.w(
+                        TAG,
+                        "Rejecting push ${push.messageId}: distributor token mismatch for instance $distributorInstance"
+                )
+                return false
+            }
+        }
+
         val recordResult =
                 pushRepository?.recordPush(
                         IncomingPushEntity(
                                 id = push.messageId,
-                                type = TYPE_MESSAGE_DELIVERY,
+                                type = push.type ?: TYPE_UNKNOWN,
                                 payloadBase64 =
                                         JvmBase64.getEncoder().encodeToString(push.envelope),
                                 distributorInstance = distributorInstance,
@@ -90,6 +125,40 @@ class PushProcessor(
         if (recordResult?.isFailure == true) {
             Log.e(TAG, "Failed to record push ${push.messageId}", recordResult.exceptionOrNull())
             return false
+        }
+
+        if (push.type != TYPE_MESSAGE_DELIVERY) {
+            return try {
+                when (push.type) {
+                    TYPE_WAKE -> backgroundSync()
+                    TYPE_READ_RECEIPT ->
+                            database.messageDao().markRead(push.messageId, push.timestamp)
+                    TYPE_TYPING -> {
+                        val deviceAddress = authManager?.getDeviceAddress()
+                        val threadId =
+                                if (deviceAddress != null) {
+                                    deriveThreadId(push.sender, deviceAddress)
+                                } else {
+                                    deriveThreadId(push.sender)
+                                }
+                        typingIndicator(threadId, push.sender)
+                    }
+                    null -> return fail(push.messageId, "Missing push type")
+                    else -> return fail(push.messageId, "Unknown push type: ${push.type}")
+                }
+                val markResult = pushRepository?.markProcessed(push.messageId)
+                if (markResult?.isFailure == true) {
+                    Log.e(
+                            TAG,
+                            "Failed to mark push ${push.messageId} processed",
+                            markResult.exceptionOrNull()
+                    )
+                    return false
+                }
+                true
+            } catch (e: Exception) {
+                fail(push.messageId, e.message ?: e::class.simpleName ?: "Push routing failed")
+            }
         }
 
         return try {
@@ -168,7 +237,7 @@ class PushProcessor(
             // 6. Persist the message and upsert the parent thread in a single transaction so a
             //    partial write can't leave the DB in a state where the message row references a
             //    missing thread row (FK) or the thread preview drifts from the last message.
-            database.withTransaction {
+            transaction {
                 val threadDao = database.threadDao()
                 if (threadDao.existsById(threadId)) {
                     threadDao.updateLastMessage(threadId, payload.body, push.timestamp)
@@ -224,6 +293,40 @@ class PushProcessor(
         }
     }
 
+    private suspend fun recordUnparsedPush(
+            rawPayload: ByteArray,
+            distributorInstance: String,
+            reason: String,
+    ): Boolean {
+        val json = String(rawPayload, Charsets.UTF_8)
+        val pushId =
+                Regex("\\\"message_id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"")
+                        .find(json)
+                        ?.groupValues
+                        ?.get(1)
+                        ?: return false
+        val type =
+                Regex("\\\"type\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"")
+                        .find(json)
+                        ?.groupValues
+                        ?.get(1)
+                        ?.ifBlank { TYPE_UNKNOWN }
+                        ?: TYPE_UNKNOWN
+        val recordResult =
+                pushRepository?.recordPush(
+                        IncomingPushEntity(
+                                id = pushId,
+                                type = type,
+                                payloadBase64 = JvmBase64.getEncoder().encodeToString(rawPayload),
+                                distributorInstance = distributorInstance,
+                                receivedAt = System.currentTimeMillis(),
+                        ),
+                )
+        if (recordResult?.isFailure == true) return false
+        val failureReason = if (!json.contains("\"type\"")) "Missing push type" else reason
+        return fail(pushId, failureReason)
+    }
+
     private suspend fun fail(pushId: String, reason: String): Boolean {
         val markResult = pushRepository?.markFailed(pushId, reason)
         if (markResult?.isFailure == true) {
@@ -246,7 +349,7 @@ class PushProcessor(
      * ```
      */
     private fun parsePushPayload(json: String): PushMessage {
-        val dto = Json.decodeFromString(PushPayloadDto.serializer(), json)
+        val dto = Json.decodeFromString<PushPayloadDto>(json)
 
         // Decode base64 envelope. Pin to NO_WRAP to match the rustpush emitter — DEFAULT would
         // silently accept newline-wrapped input and could mask corruption.
@@ -259,6 +362,8 @@ class PushProcessor(
                 sender = dto.sender,
                 timestamp = dto.timestamp,
                 envelope = envelopeBytes,
+                type = dto.type,
+                distributorToken = dto.distributor_token ?: dto.token,
         )
     }
 
@@ -288,11 +393,18 @@ class PushProcessor(
             val sender: String,
             val timestamp: Long,
             val envelope: String, // base64
+            val type: String? = null,
+            val distributor_token: String? = null,
+            val token: String? = null,
     )
 
     companion object {
         private const val TAG = "PushProcessor"
         private const val TYPE_MESSAGE_DELIVERY = "MESSAGE_DELIVERY"
+        private const val TYPE_WAKE = "WAKE"
+        private const val TYPE_READ_RECEIPT = "READ_RECEIPT"
+        private const val TYPE_TYPING = "TYPING"
+        private const val TYPE_UNKNOWN = "UNKNOWN"
         private const val DEFAULT_DISTRIBUTOR_INSTANCE = "unknown"
 
         // Message status constants (from milestone-2.md)

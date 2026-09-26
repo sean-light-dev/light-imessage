@@ -10,26 +10,26 @@ adaptations forced by the SDK sandbox.
 All application Kotlin sources from `light-message/tool/src/main` now live under
 `tool/src/main/kotlin/com/thelightphone/lightimessage/`, package-renamed:
 
-| Area | Files | Adaptation |
-| --- | --- | --- |
-| `domain/auth`, `domain/codec`, `domain/crypto`, `domain/push` | state machine, plist codec, envelope codec, JCE crypto | package rename only (pure JVM) |
-| `domain/relay` | WebSocket `RelayService`, commands, reconnect policy, `PersistThenAckPolicy` | package rename; legacy ByteArray-based placeholder `IMessageCodec` inside `RelayService.kt` deleted in favor of the real `domain.codec.IMessageCodec` |
-| `domain/native` | Unix-socket `NativeServiceClient` + state | package rename; unused `Context` ctor param dropped (tool code may not import `android.content.Context`) |
-| `data/dao`, `data/entity`, `data/repository` | Room layer | package rename only |
-| `data/database/ImessageDatabase` | Room database | `getInstance(Context)` → `getInstance(SealedLightContext)` via the SDK's `buildDatabase` |
-| `data/relay`, `data/provisioning` | OkHttp HTTPS clients | package rename; OkHttp kept (whitelisted, added to version catalog) |
+| Area                                                          | Files                                                                        | Adaptation                                                                                                                                            |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `domain/auth`, `domain/codec`, `domain/crypto`, `domain/push` | state machine, plist codec, envelope codec, JCE crypto                       | package rename only (pure JVM)                                                                                                                        |
+| `domain/relay`                                                | WebSocket `RelayService`, commands, reconnect policy, `PersistThenAckPolicy` | package rename; legacy ByteArray-based placeholder `IMessageCodec` inside `RelayService.kt` deleted in favor of the real `domain.codec.IMessageCodec` |
+| `domain/native`                                               | Unix-socket `NativeServiceClient` + state                                    | package rename; unused `Context` ctor param dropped (tool code may not import `android.content.Context`)                                              |
+| `data/dao`, `data/entity`, `data/repository`                  | Room layer                                                                   | package rename only                                                                                                                                   |
+| `data/database/ImessageDatabase`                              | Room database                                                                | `getInstance(Context)` → `getInstance(SealedLightContext)` via the SDK's `buildDatabase`                                                              |
+| `data/relay`, `data/provisioning`                             | OkHttp HTTPS clients                                                         | package rename; OkHttp kept (whitelisted, added to version catalog)                                                                                   |
 
 ## What was rewritten (sandbox-driven)
 
-| Before (light-message) | After (this repo) | Why |
-| --- | --- | --- |
-| `ImeApplication` + `AppWorkerFactory` DI | `di/AppServices` lazy service locator, built from the first `SealedLightContext` | `android.app.Application` import is banned; SDK owns the Application class |
-| `MainActivity` + `ui/AppNavigation` placeholder | `ui/ConversationListScreen` (`@InitialScreen`) + `ui/ThreadScreen` with `LightViewModel`s | `androidx.activity` is banned; SDK owns the Activity and navigation |
-| `push/PushReceiver` + `PushProcessingWorker` | `push/PushProcessor`, invoked from `ImessageEntryPoint.onPushNotification` | `BroadcastReceiver` is banned; SDK routes UnifiedPush payloads to the entry point |
-| `domain/sync/BackgroundSyncWorker` | `sync/BackgroundSyncJob` (`@LightJob`), scheduled via `LightWork.enqueuePeriodic` (15 min) from `ConversationListScreen.willShow()` | Workers can't get custom factories; SDK wraps WorkManager in `LightWork` |
-| `data/datastore/EncryptedTokenRepository` on `EncryptedSharedPreferences` | Same `ITokenRepository` interface; impl now DataStore + AndroidKeyStore AES-256-GCM (manual, per-value random IV) | `androidx.security:security-crypto` is not on the dependency allowlist — this is the ADR-006 fallback path |
-| `AndroidManifest.xml`, `res/` | `tool/lighttool.toml` (manifest is generated) | user manifests are rejected; permissions: INTERNET, ACCESS_NETWORK_STATE, POST_NOTIFICATIONS, WAKE_LOCK |
-| `lighttool.toml` `versionCode = 0` | `versionCode = 1` | plugin validation requires ≥ 1 |
+| Before (light-message)                                                    | After (this repo)                                                                                                                   | Why                                                                                                        |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `ImeApplication` + `AppWorkerFactory` DI                                  | `di/AppServices` lazy service locator, built from the first `SealedLightContext`                                                    | `android.app.Application` import is banned; SDK owns the Application class                                 |
+| `MainActivity` + `ui/AppNavigation` placeholder                           | `ui/ConversationListScreen` (`@InitialScreen`) + `ui/ThreadScreen` with `LightViewModel`s                                           | `androidx.activity` is banned; SDK owns the Activity and navigation                                        |
+| `push/PushReceiver` + `PushProcessingWorker`                              | `push/PushProcessor`, invoked from `ImessageEntryPoint.onPushNotification`                                                          | `BroadcastReceiver` is banned; SDK routes UnifiedPush payloads to the entry point                          |
+| `domain/sync/BackgroundSyncWorker`                                        | `sync/BackgroundSyncJob` (`@LightJob`), scheduled via `LightWork.enqueuePeriodic` (15 min) from `ConversationListScreen.willShow()` | Workers can't get custom factories; SDK wraps WorkManager in `LightWork`                                   |
+| `data/datastore/EncryptedTokenRepository` on `EncryptedSharedPreferences` | Same `ITokenRepository` interface; impl now DataStore + AndroidKeyStore AES-256-GCM (manual, per-value random IV)                   | `androidx.security:security-crypto` is not on the dependency allowlist — this is the ADR-006 fallback path |
+| `AndroidManifest.xml`, `res/`                                             | `tool/lighttool.toml` (manifest is generated)                                                                                       | user manifests are rejected; permissions: INTERNET, ACCESS_NETWORK_STATE, POST_NOTIFICATIONS, WAKE_LOCK    |
+| `lighttool.toml` `versionCode = 0`                                        | `versionCode = 1`                                                                                                                   | plugin validation requires ≥ 1                                                                             |
 
 ## What was dropped
 
@@ -50,9 +50,9 @@ All application Kotlin sources from `light-message/tool/src/main` now live under
   (before any screen/job ran) cannot touch the database. `ImessageEntryPoint` logs and defers;
   the periodic `background-sync` job re-requests pending messages from the relay, so delivery is
   eventually consistent rather than instant in that corner.
-- Codec key material (`CodecKeys` provider in `AppServices`) still returns null until auth
-  provisioning lands (pre-existing TODO F-4); inbound envelopes are dropped loudly in that state,
-  matching the old pipeline's terminal behavior.
+- Codec key material is loaded from the encrypted certificate and private-key material saved by
+  completed auth provisioning. Before provisioning, inbound envelopes remain unprocessed and are
+  recovered by the next relay sync.
 
 ## Tests
 

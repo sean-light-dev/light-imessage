@@ -2,7 +2,9 @@ package com.thelightphone.lightimessage.di
 
 import com.thelightphone.lightimessage.data.database.ImessageDatabase
 import com.thelightphone.lightimessage.data.datastore.EncryptedTokenRepository
+import com.thelightphone.lightimessage.data.datastore.IPushRegistrationRepository
 import com.thelightphone.lightimessage.data.datastore.ITokenRepository
+import com.thelightphone.lightimessage.data.datastore.PushRegistrationRepository
 import com.thelightphone.lightimessage.data.provisioning.IProvisioningClient
 import com.thelightphone.lightimessage.data.provisioning.ProvisioningHttpClient
 import com.thelightphone.lightimessage.data.relay.IRelayHttpClient
@@ -21,7 +23,10 @@ import com.thelightphone.lightimessage.domain.codec.PlistCodec
 import com.thelightphone.lightimessage.domain.crypto.CryptoEngine
 import com.thelightphone.lightimessage.domain.relay.IRelayService
 import com.thelightphone.lightimessage.domain.relay.RelayService
+import com.thelightphone.lightimessage.push.ProvisionedCodecKeysProvider
 import com.thelightphone.lightimessage.push.PushProcessor
+import com.thelightphone.lightimessage.sync.BACKGROUND_SYNC_JOB_KEY
+import com.thelightphone.sdk.LightWork
 import com.thelightphone.sdk.SealedLightContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -41,7 +46,7 @@ import okhttp3.OkHttpClient
  * or job has initialized the locator at least once in the process. See
  * [com.thelightphone.lightimessage.ImessageEntryPoint].
  */
-class AppServices private constructor(lightContext: SealedLightContext) {
+class AppServices private constructor(private val lightContext: SealedLightContext) {
 
     /** Process-wide scope for long-lived services (relay connection, keepalives). */
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -49,6 +54,8 @@ class AppServices private constructor(lightContext: SealedLightContext) {
     val database: ImessageDatabase = ImessageDatabase.getInstance(lightContext)
 
     val tokenRepository: ITokenRepository = EncryptedTokenRepository(lightContext.dataStore)
+    val pushRegistrationRepository: IPushRegistrationRepository =
+            PushRegistrationRepository(lightContext.dataStore)
 
     val messageRepository: IMessageRepository by lazy { MessageRepository(database) }
     val threadRepository: IThreadRepository by lazy { ThreadRepository(database) }
@@ -89,17 +96,19 @@ class AppServices private constructor(lightContext: SealedLightContext) {
         )
     }
 
+    private val provisionedCodecKeysProvider by lazy {
+        ProvisionedCodecKeysProvider(tokenRepository)
+    }
+
     val pushProcessor: PushProcessor by lazy {
         PushProcessor(
                 database = database,
                 messageCodec = messageCodec,
                 pushRepository = pushProcessingRepository,
+                pushRegistrationRepository = pushRegistrationRepository,
                 authManager = authManager,
-                // TODO(F-4): sender cert / recipient key are blocked on auth provisioning
-                // completing. Until key material exists, inbound envelopes cannot be decrypted;
-                // PushProcessor logs and drops them (same terminal behavior as the old
-                // WorkManager pipeline exhausting its retries).
-                codecKeysProvider = { null },
+                codecKeysProvider = { provisionedCodecKeysProvider.get() },
+                backgroundSync = { LightWork.enqueue(lightContext, BACKGROUND_SYNC_JOB_KEY) },
         )
     }
 
