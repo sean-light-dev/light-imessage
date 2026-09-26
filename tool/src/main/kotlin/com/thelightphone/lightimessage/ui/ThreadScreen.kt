@@ -17,6 +17,7 @@ import com.thelightphone.lightimessage.data.entity.MessageEntity
 import com.thelightphone.lightimessage.data.repository.IMessageRepository
 import com.thelightphone.lightimessage.data.repository.IThreadRepository
 import com.thelightphone.lightimessage.di.AppServices
+import com.thelightphone.lightimessage.push.TypingIndicatorSurface
 import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.LightViewModel
 import com.thelightphone.sdk.SealedLightActivity
@@ -27,6 +28,7 @@ import com.thelightphone.sdk.ui.LightTheme
 import com.thelightphone.sdk.ui.LightThemeController
 import com.thelightphone.sdk.ui.LightThemeTokens
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 class ThreadViewModel(
@@ -36,6 +38,7 @@ class ThreadViewModel(
 ) : LightViewModel<Unit>() {
 
     val messages: MutableStateFlow<List<MessageEntity>> = MutableStateFlow(emptyList())
+    val typingSender = TypingIndicatorSurface.typingByThread.map { it[threadId] }
 
     override fun onScreenShow(screen: SimpleLightScreen<Unit>) {
         super.onScreenShow(screen)
@@ -65,6 +68,7 @@ class ThreadScreen(
     override fun Content() {
         val themeColors by LightThemeController.colors.collectAsState()
         val messages by viewModel.messages.collectAsState()
+        val typingSender by viewModel.typingSender.collectAsState(initial = null)
 
         LightTheme(colors = themeColors) {
             Column(
@@ -79,6 +83,15 @@ class ThreadScreen(
                         modifier = Modifier.padding(bottom = 16.dp),
                 )
 
+                if (typingSender != null) {
+                    LightText(
+                            text = "${typingSender} is typing…",
+                            variant = LightTextVariant.Detail,
+                            lighten = true,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
+
                 if (messages.isEmpty()) {
                     LightText(
                             text = "No messages yet.",
@@ -89,8 +102,7 @@ class ThreadScreen(
                     LazyColumn {
                         items(messages) { message ->
                             Column(
-                                    modifier =
-                                            Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                             ) {
                                 LightText(
                                         text = if (message.isOutgoing) "You" else message.sender,

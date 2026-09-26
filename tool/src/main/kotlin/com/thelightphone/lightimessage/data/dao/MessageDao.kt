@@ -38,11 +38,13 @@ interface MessageDao {
 
     /**
      * Outgoing messages eligible for send retry: not yet relay-acked (2=SENT) and not in a
-     * success-terminal state (3=DELIVERED, 4=READ). Without the `isOutgoing` filter this query
-     * also matched *incoming* rows (status 0/3/4), and the background sync job would "resend"
-     * a received message back to its sender.
+     * success-terminal state (3=DELIVERED, 4=READ). Without the `isOutgoing` filter this query also
+     * matched *incoming* rows (status 0/3/4), and the background sync job would "resend" a received
+     * message back to its sender.
      */
-    @Query("SELECT * FROM messages WHERE isOutgoing = 1 AND status NOT IN (2, 3, 4) ORDER BY timestamp ASC")
+    @Query(
+            "SELECT * FROM messages WHERE isOutgoing = 1 AND status NOT IN (2, 3, 4) ORDER BY timestamp ASC"
+    )
     fun getUndelivered(): Flow<List<MessageEntity>>
 
     @Query("SELECT * FROM messages WHERE readReceiptAt IS NULL ORDER BY timestamp ASC")
@@ -56,7 +58,7 @@ interface MessageDao {
             deliveryReceiptAt: Long,
     )
 
-    @Query("UPDATE messages SET readReceiptAt = :readReceiptAt WHERE id = :messageId")
+    @Query("UPDATE messages SET status = 4, readReceiptAt = :readReceiptAt WHERE id = :messageId")
     suspend fun markRead(
             messageId: String,
             readReceiptAt: Long,
