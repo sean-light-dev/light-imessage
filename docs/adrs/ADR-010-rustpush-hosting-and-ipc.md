@@ -1,120 +1,219 @@
-# ADR 010: OS-Managed rustpush Hosting and IPC Socket
+# ADR 010: SDK Native-Service Capability for rustpush
 
-**Status:** Spike decision — unsupported in the current SDK release
+**Status:** Proposed — implementation belongs on `develop`
 
 **Date:** 2026-09-26
 
-**Tracking:** [GitHub issue #11](https://github.com/sean-light-dev/light-imessage/issues/11), follow-up to [issue #7](https://github.com/sean-light-dev/light-imessage/issues/7)
+**Tracking:** [GitHub issue #7](https://github.com/sean-light-dev/light-imessage/issues/7) and [issue #11](https://github.com/sean-light-dev/light-imessage/issues/11)
 
 ## Context
 
-Milestone 3 needs rustpush to hold the Apple push connection and expose local IPC at
-`rustpush_ipc`. The repository contains a Kotlin `NativeServiceClient` and a Rust
-`native-service` transport scaffold, but those artifacts do not by themselves define who
-starts or supervises the native process.
+Milestone 3 has a tested tool-side `NativeServiceClient` and a Rust IPC scaffold, but no
+supported owner for the rustpush process. A tool may not use `android.app.*`, bind or start a
+service, or supply arbitrary manifest components. The existing `native-service` Gradle module
+only packages `librustpush_service.so` for `arm64-v8a`; a shared library is not a supervised,
+runnable Android service.
 
-The Light SDK is a generated-manifest sandbox. Tool code may not use `android.app.*`,
-custom services, receivers, or service binding, and `tool/lighttool.toml` currently has no
-native-service capability. The plugin does allow the `native-service` module to build NDK
-artifacts and allowlists bundled native libraries, but an APK library is not an Android
-process launcher. The current Rust library exports only an ABI probe; its binary entry
-point is not launched by the tool and its Apple-facing handlers remain stubs.
-
-Evidence:
-
-- [ADR 005](./ADR-005-unifiedpush-notifications.md) says the bridge must be hosted outside
-the tool sandbox and notes that packaging/launch wiring was not complete.
-- [Migration status](../initiatives/v1/migration-status.md) records the IPC client as
-implemented but unwired, native packaging as pending, and no native process as existing.
-- [Milestone 3 migration note](../initiatives/v1/codespec/milestone-3.md) records the same
-SDK constraint and distinguishes the client contract from deployment.
-- `tool/src/main/kotlin/.../NativeServiceClient.kt` and
-`native-service/src/protocol.rs` agree on the current transport: abstract AF_UNIX socket
-`rustpush_ipc`, 4-byte big-endian length-prefixed UTF-8 JSON, maximum 16 MiB frame, and
-one response per serialized command.
-- `native-service/src/socket.rs` binds the abstract socket and `native-service/src/main.rs`
-serves one client at a time, but does not provide Android/LightOS lifecycle integration.
+This is an SDK-expansion request, not a request to evade the sandbox. `develop` already has the
+right extension pattern: an allowlisted `lighttool.toml` capability is validated by
+`LightToolMetadata`, rendered by `ManifestGenerator`, and consumed by an SDK/OS-owned runtime.
+`detached-audio` adds the SDK-owned `LightAudioService`; `tool-manager-provider` adds a
+discoverable provider; `LightWork`, push, NFC, and connectivity similarly keep framework
+ownership behind SDK APIs.
 
 ## Decision
 
-Neither tool-hosted path is supported today:
+Add one **allowlisted, rustpush-specific native-service capability** on `develop`. LightOS owns
+installation, launch, supervision, access control, and teardown. The tool only receives the
+typed SDK client and status; it never launches a process, declares an Android service, or opens
+an arbitrary socket.
 
-1. **Do not implement a custom `android.app.Service` or an in-process tool launcher.** It is
-   prohibited by the SDK policy and would make lifecycle ownership dependent on a tool APK.
-2. **Do not treat a bundled `.so` as a runnable service.** Bundling is a permitted build
-   artifact, not evidence that LightOS will load, execute, or supervise it.
-3. **Target a LightOS-owned native-service capability.** LightOS, not the tool, must own the
-   rustpush process and expose a capability/registration API for an approved native service.
-   The exact supervisor implementation (dedicated executable, extracted native binary, or
-   OS-managed loader) is an OS decision and is intentionally not invented here.
+### 1. Tool declaration and generated metadata
 
-### Minimum temporary contract
+Extend the current capability model rather than adding a free-form service declaration:
 
-Until that capability exists, rustpush IPC is a **transport contract only**, not a supported
-runtime feature. The minimum contract for the eventual capability is:
+```toml
+[tool]
+capabilities = ["rustpush-native-service"]
 
-- **Process lifecycle owner:** the LightOS native-service supervisor. It owns one rustpush
-  instance per device/service identity, not the tool process.
-- **Startup:** the supervisor starts the service at boot for a registered push-capable tool,
-  or on the first OS-level request for that capability. Tool startup only connects; it never
-  starts a process. Startup must complete the socket bind before reporting ready.
-- **Socket ownership and namespace:** rustpush owns and binds the abstract AF_UNIX
-  `rustpush_ipc` listener. There is no filesystem socket, pathname, or APK-private socket
-  to share. The OS must namespace/qualify the name if more than one service instance can
-  exist; otherwise the current singleton name is the contract.
-- **Access permissions:** the OS must restrict connection to the registered LightOS tool
-  identity (prefer same-UID or an equivalent kernel/OS policy). Abstract sockets have no
-  filesystem mode bits, so `chmod`/directory permissions are not an access-control plan.
-  The supervisor must prevent arbitrary applications from connecting.
-- **Restart and failure:** bind failure or process exit is reported to the OS supervisor;
-  the supervisor retries with bounded exponential backoff and records a terminal unhealthy
-  state after its retry budget. The Kotlin client treats connect/read/heartbeat failure as
-  unavailable and may retry using its existing 1–32 second, five-attempt policy. It must
-  fall back to the existing relay/periodic sync path rather than claim push delivery.
-- **Shutdown:** LightOS sends a graceful termination signal when disabling/uninstalling the
-  capability or shutting down the device, waits for a bounded drain period, then force-kills
-  the process. Dropping the listener must reclaim the abstract socket; a later start must
-  be able to bind the same name.
-- **IPC behavior:** retain the current framing and `protocol.rs` tagged JSON contract. A
-  successful `PING`/`PONG` proves transport readiness only; it does not imply that Apple
-  activation, send, receive, or UnifiedPush handling is implemented.
+[nativeService]
+id = "rustpush"
+protocolVersion = 1
+abi = "arm64-v8a"
+artifact = "rustpush-service"
+startup = "on-demand"
+```
 
-## Required changes before this can be enabled
+`LightToolMetadata` must reject the `[nativeService]` table unless the capability is present,
+require all five fields when it is present, and currently accept only the exact values above.
+That deliberately prevents a tool from registering an arbitrary executable, ABI, protocol, or
+startup policy. The plugin emits these application metadata keys in addition to the normal
+`CAPABILITY_RUSTPUSH_NATIVE_SERVICE` marker:
 
-These are platform/SDK changes, not work for a tool-side Android service:
+| Key                                                     | Value              |
+| ------------------------------------------------------- | ------------------ |
+| `com.thelightphone.sdk.NATIVE_SERVICE_ID`               | `rustpush`         |
+| `com.thelightphone.sdk.NATIVE_SERVICE_PROTOCOL_VERSION` | `1`                |
+| `com.thelightphone.sdk.NATIVE_SERVICE_ABI`              | `arm64-v8a`        |
+| `com.thelightphone.sdk.NATIVE_SERVICE_ARTIFACT`         | `rustpush-service` |
+| `com.thelightphone.sdk.NATIVE_SERVICE_STARTUP`          | `on-demand`        |
 
-1. **LightOS:** provide and document a native-service supervisor with start-on-boot/on-demand,
-   restart, shutdown, logging, resource limits, and failure-state semantics; reserve and
-   protect the `rustpush_ipc` abstract namespace.
-2. **SDK:** expose a sanctioned native-service client/registration capability (or an OS RPC
-   that returns readiness and status), including lifecycle and unavailable-state APIs. The
-   existing raw `NativeServiceClient` can remain the wire-level implementation underneath.
-3. **Manifest/tool metadata:** add an allowlisted capability such as
-   `rustpush-native-service` that declares the service identity, ABI(s), startup policy, and
-   required socket contract. The generated manifest must carry only OS-recognized metadata;
-   it must not permit a tool to declare an arbitrary Android service.
-4. **Packaging/build:** define how the `native-service` output is installed for the OS
-   supervisor, verify the ARM64 artifact and rustpush feature set, and make the artifact
-   available to the LightOS image/tool manager. `cargo-ndk` and APK `jniLibs` wiring alone
-   do not provide process startup.
-5. **rustpush:** replace the current `ACTIVATE`, `SEND_MESSAGE`, and `GET_MESSAGES` error
-   stubs and implement the push/UnifiedPush bridge before advertising the capability as
-   production-ready.
+The generated manifest declares **no** tool `android.app.Service`, receiver, provider, intent
+filter, permission, or socket name for this capability. LightOS discovers the signed metadata
+through its existing SDK/tool scan; it must verify the package signature and permitlist before
+registering the descriptor.
 
-## Consequences
+### 2. Public SDK API
 
-- The current repository can continue testing the Kotlin/Rust framing contract without
-  pretending that a tool can host or supervise rustpush.
-- Push delivery remains unavailable through rustpush in the SDK tool; relay and periodic sync
-  are the temporary fallback.
-- A future implementation must be reviewed at the OS/SDK boundary first. It must not add a
-  custom `android.app.Service`, arbitrary manifest entry, or tool-owned process launcher.
-- The abstract socket has no file permissions; identity enforcement is a platform concern and
-  is a release blocker, not a detail to defer to the Kotlin client.
+Expose the capability from `sdk:client`, using the entry-point/application initialization path
+already owned by `LightSdkApplication`:
 
-## Revisit criteria
+```kotlin
+object LightNativeServices {
+    fun rustpush(): RustpushService
+}
 
-Revisit this ADR when LightOS documents the native-service capability and provides a test
-image or emulator fixture that can start the service, restrict `rustpush_ipc` access, restart
-it, and observe graceful shutdown. At that point add an integration test for lifecycle,
-permissions, and reconnect behavior before wiring `NativeServiceClient` into `AppServices`.
+interface RustpushService {
+    val status: StateFlow<NativeServiceStatus>
+    suspend fun connect(): Result<RustpushClient>
+}
+
+sealed interface NativeServiceStatus {
+    data object Unavailable : NativeServiceStatus
+    data object Starting : NativeServiceStatus
+    data object Ready : NativeServiceStatus
+    data class Restarting(val attempt: Int, val retryAfter: Duration) : NativeServiceStatus
+    data class Failed(val reason: NativeServiceFailure) : NativeServiceStatus
+}
+```
+
+`RustpushClient` owns the existing framed `PING`, `ACTIVATE`, `SEND_MESSAGE`, and
+`GET_MESSAGES` protocol and exposes its connection state; it must not expose a socket path,
+`LocalSocket`, process handle, launch method, or a `stop()` operation. `connect()` asks LightOS
+to ensure the registered descriptor is running and completes only after readiness is confirmed.
+`Unavailable` means unsupported SDK/OS, missing declaration, unsupported ABI, or policy denial;
+`Failed` is a diagnosed terminal service failure. `Ready` means a socket is authenticated and a
+`PING` receives `PONG`; it does not claim Apple activation or message delivery is ready.
+
+The API is intentionally service-specific for the first release. A generic executable registry
+would reintroduce arbitrary tool-controlled native services before there is a second proven use
+case.
+
+### 3. LightOS/tool-manager responsibility and artifact identity
+
+Add a LightOS native-service supervisor, invoked by the existing tool manager/SDK discovery
+path. It must:
+
+1. validate the signed generated metadata, capability policy, APK version, certificate identity,
+   protocol version, SHA-256 of the packaged executable, and device ABI;
+2. extract the declared artifact to a supervisor-owned, non-writable directory, verify its digest
+   before each launch, and execute it under the service's assigned app identity;
+3. launch on the first `LightNativeServices.rustpush().connect()` request (not from tool code),
+   expose status, capture bounded logs, enforce resource limits, and restart crashes with a
+   documented bounded exponential policy; and
+4. stop the process on uninstall, capability revocation, or device shutdown: request graceful
+   exit, wait a bounded grace period, then kill and remove the extracted executable.
+
+Replace the current `.so`-only handoff with a separately packaged, uncompressed Android PIE
+executable at:
+
+```
+assets/light-native/rustpush/arm64-v8a/rustpush-service
+```
+
+The artifact is the Cargo `[[bin]]` `rustpush-service` output, not
+`librustpush_service.so`; the latter may remain a build/link check but is not the service
+artifact. The packaging task produces an adjacent signed descriptor containing the fixed service
+id, ABI, protocol version, SHA-256, and artifact path. The plugin verifies this descriptor
+against `[nativeService]`; the supervisor verifies it again after installation. Initial support
+is `arm64-v8a` only, matching `native-service/build.gradle.kts`; other ABIs are a new,
+explicitly tested metadata value and artifact, never a fallback.
+
+### 4. Secure socket contract
+
+The service no longer binds the globally guessable `rustpush_ipc` name. At launch, the supervisor
+computes and passes an abstract socket name:
+
+```
+ltns.v1.<base32(sha256(packageName || signingCertDigest || "rustpush"))[0..31]>
+```
+
+The name has no leading `@`/NUL in metadata; the Rust listener and Android `LocalSocket` use it
+in the abstract namespace. It is an implementation-derived endpoint, never a public tool API.
+The supervisor passes it as the service's `--socket` argument and gives it only to the SDK client
+for that verified registration.
+
+The listener must validate each connecting peer with `SO_PEERCRED` against the package UID
+registered by LightOS before reading a frame; all other peers are closed. If a target image
+cannot run the service with verifiable peer credentials, this capability is unavailable rather
+than falling back to a predictable socket or filesystem permissions. Abstract AF_UNIX sockets
+have no filesystem mode bits, so `chmod` is not an access-control design.
+
+Keep protocol version 1: 4-byte big-endian length + UTF-8, serde internally-tagged
+SCREAMING_SNAKE_CASE JSON, 16 MiB maximum frame, and one serialized response per command.
+A protocol-version mismatch fails registration before launch.
+
+### 5. Lifecycle, readiness, reconnect, and status
+
+The supervisor transitions `Unavailable → Starting → Ready`, reports `Restarting` for its bounded
+restart policy, and reports `Failed` with a stable reason code. It must not report `Ready` until
+all of these succeed: executable digest verification, process launch, socket bind, permitted SDK
+client connection, and `PING`/`PONG`.
+
+`RustpushClient` retains the current client-side 30-second heartbeat, 5-second PONG timeout, and
+five reconnect attempts with 1/2/4/8/16-second backoff. Socket read/write failure moves its
+connection state to reconnecting and triggers a fresh supervisor status query; a process crash
+may therefore be restarted by LightOS while the client reconnects. Exhaustion produces a client
+failure while the supervisor may still later recover. Explicitly closing the client disconnects
+only that client; it does not stop the OS-owned service. v1 continues to use relay and periodic
+sync when status is unavailable or failed.
+
+## Develop-side work and tests
+
+1. **Plugin/metadata:** extend `LightToolMetadata`, validation tests, `ManifestGenerator`, and
+   metadata docs. Test absent capability, invalid/missing fields, only the fixed descriptor,
+   generated keys, and that no Android service component is emitted.
+2. **SDK:** add `LightNativeServices`, `RustpushService`, status/failure models, and a
+   capability-marker check patterned after `DetachedAudioCapability`. Test missing marker,
+   unavailable/ABI/protocol failures, state transitions, readiness gating, client reconnect, and
+   that tools cannot stop or name the process/socket.
+3. **Build/package:** make the native module produce the PIE executable plus descriptor; test
+   arm64 artifact type, descriptor digest, APK path, tamper rejection, and no `.so` substitution.
+4. **LightOS/emulator:** implement the supervisor and fixture. Integration-test discovery,
+   on-demand launch, `PING`/`PONG`, denied cross-package connection, crash/restart, client
+   reconnect, graceful shutdown/socket reuse, update/uninstall cleanup, and status propagation.
+5. **Protocol:** retain the existing Kotlin/Rust framing tests, then add version-mismatch and
+   peer-identity tests. Do not advertise activation/send/receive until the existing Rust command
+   stubs and UnifiedPush bridge have real end-to-end tests.
+
+## Rollout and compatibility
+
+Ship metadata parsing and the SDK API first, with `Unavailable` on existing LightOS images. Ship
+the supervisor and emulator fixture behind the capability allowlist; enable the capability only
+for signed, `arm64-v8a`, protocol-1 builds after integration tests pass. Older tools omit the
+metadata and behave unchanged. Older SDK/OS combinations fail closed as `Unavailable`; they do
+not attempt the old `rustpush_ipc` endpoint. A protocol or ABI change uses a new explicit value
+and coordinated supervisor support, preserving the v1 descriptor contract.
+
+## Narrow v1 follow-up after SDK support lands
+
+Do not create a custom `android.app.Service`. Replace `UnavailableNativeServiceCapability` in
+`AppServices` with a thin adapter around `LightNativeServices.rustpush()`, and migrate the
+existing `NativeServiceClient` behavior to `RustpushClient` rather than duplicating transport.
+Wire the already-defined status into the iMessage UI/diagnostics, exercise real `PING`/`PONG` and
+reconnect against the emulator fixture, and retain relay/periodic-sync fallback. Separately land
+real rustpush activation/send/receive handling before claiming Milestone 3 delivery complete.
+
+## References
+
+- `223458e` — capability-gated tool-manager provider metadata on `develop`
+- `a92b4e7` — capability-gated foreground audio and SDK-owned service
+- `c1bcbba`, `587d11b`, `601f9d0`, `5dba2fc` — NFC, connectivity, `LightWork`, and push SDK
+  extension precedents
+- `plugin/src/main/kotlin/com/thelightphone/plugin/LightToolMetadata.kt`
+- `plugin/src/main/kotlin/com/thelightphone/plugin/ManifestGenerator.kt`
+- `sdk/client/src/main/kotlin/com/thelightphone/sdk/LightSdkApplication.kt`
+- `tool/src/main/kotlin/com/thelightphone/lightimessage/domain/native/NativeServiceClient.kt`
+- `native-service/build.gradle.kts`, `native-service/Cargo.toml`, and
+  `native-service/src/{main.rs,socket.rs,protocol.rs}`
+- `docs/initiatives/v1/codespec/milestone-3.md` §§4.1, 4.5, 5.1

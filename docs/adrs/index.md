@@ -17,3 +17,4 @@ All structural and technical decisions for the LightOS iMessage Client are docum
 | [ADR 007](./ADR-007-lp3keyboard.md)               | Embedded Lp3Keyboard over System IME           | Accepted |
 | [ADR 008](./ADR-008-workmanager-sync.md)          | androidx.work for Background Sync              | Accepted |
 | [ADR 009](./ADR-009-service-locator.md)           | Lazy Service Locator over Application-level DI | Accepted |
+| [ADR 010](./ADR-010-rustpush-hosting-and-ipc.md)  | SDK Native-Service Capability for rustpush     | Proposed |
