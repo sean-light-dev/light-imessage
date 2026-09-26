@@ -21,6 +21,8 @@ import com.thelightphone.lightimessage.domain.codec.IMessageCodec
 import com.thelightphone.lightimessage.domain.codec.MessageCodec
 import com.thelightphone.lightimessage.domain.codec.PlistCodec
 import com.thelightphone.lightimessage.domain.crypto.CryptoEngine
+import com.thelightphone.lightimessage.domain.native.NativeServiceCapability
+import com.thelightphone.lightimessage.domain.native.UnavailableNativeServiceCapability
 import com.thelightphone.lightimessage.domain.relay.IRelayService
 import com.thelightphone.lightimessage.domain.relay.RelayService
 import com.thelightphone.lightimessage.push.ProvisionedCodecKeysProvider
@@ -73,6 +75,14 @@ class AppServices private constructor(private val lightContext: SealedLightConte
 
     val relayHttpClient: IRelayHttpClient by lazy { RelayHttpClient(okHttpClient) }
     val provisioningClient: IProvisioningClient by lazy { ProvisioningHttpClient(okHttpClient) }
+
+    /**
+     * Boundary for the LightOS-owned rustpush capability. The current SDK exposes no such
+     * capability, so this remains unavailable and deliberately does not construct a socket client.
+     */
+    val nativeServiceCapability: NativeServiceCapability by lazy {
+        UnavailableNativeServiceCapability()
+    }
 
     val messageCodec: IMessageCodec by lazy { MessageCodec(PlistCodec(), CryptoEngine()) }
 
