@@ -3,19 +3,26 @@ package com.thelightphone.lightimessage.domain.native
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import android.util.Log
+import com.thelightphone.lightimessage.domain.push.PushMessage
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.io.EOFException
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.charset.StandardCharsets
+import java.util.Base64
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -31,24 +38,32 @@ import kotlinx.serialization.json.Json
  * Wire contract (must match `native-service/src/protocol.rs`):
  * - Transport: abstract-namespace AF_UNIX socket `rustpush_ipc`.
  * - Framing: 4-byte big-endian length header + UTF-8 JSON payload, max frame 16 MiB.
- * - Messages: serde internally-tagged JSON (`"type"` in SCREAMING_SNAKE_CASE). The service
- *   answers every command with exactly one event, in order, so commands are serialized through
- *   a single request lock — there are no correlation IDs on the wire.
+ * - Messages: serde internally-tagged JSON (`"type"` in SCREAMING_SNAKE_CASE). Each command has one
+ * in-order reply; unsolicited message and delivery-receipt events are routed to [observeEvents]
+ * without consuming that reply. Commands remain serialized through one request lock because there
+ * are no correlation IDs on the wire.
  * - Heartbeat: `PING` every 30s; a missing `PONG` within 5s triggers reconnect with exponential
- *   backoff (1s, 2s, 4s, 8s, 16s, 32s cap; 5 attempts before terminal `Failed`).
+ * backoff (1s, 2s, 4s, 8s, 16s, 32s cap; 5 attempts before terminal `Failed`).
  *
  * Spec: milestone-3.md § 4.1–4.5, § 5.1, § 6.2–6.5.
  */
-class NativeServiceClient(
+class NativeServiceClient
+internal constructor(
         private val scope: CoroutineScope,
-        private val socketName: String = DEFAULT_SOCKET_NAME,
+        private val socketName: String,
+        private val socketFactory: () -> IpcSocketConnection,
 ) : INativeServiceClient {
+
+    constructor(
+            scope: CoroutineScope,
+            socketName: String = DEFAULT_SOCKET_NAME
+    ) : this(scope, socketName, { LocalIpcSocketConnection(socketName) })
 
     private val _connectionState =
             MutableStateFlow<NativeServiceState>(NativeServiceState.Disconnected)
     override val connectionState: StateFlow<NativeServiceState> = _connectionState
 
-    private var ipcSocket: LocalSocket? = null
+    private var ipcSocket: IpcSocketConnection? = null
     private val socketMutex = Mutex() // guards ipcSocket ref (assign/close)
 
     /** Serializes commands: the service answers one event per command, in order. */
@@ -66,6 +81,9 @@ class NativeServiceClient(
     private var reconnectJob: Job? = null
 
     private val json = ipcJson
+    private val eventChannel = Channel<NativeEvent>(capacity = 64)
+
+    override fun observeEvents(): Flow<NativeEvent> = eventChannel.receiveAsFlow()
 
     private companion object {
         private const val TAG = "NativeServiceClient"
@@ -123,8 +141,7 @@ class NativeServiceClient(
             twoFaCode: String?,
     ): Result<ActivationStatus> {
         return try {
-            when (
-                    val event =
+            when (val event =
                             sendCommand(
                                     IpcCommand.Activate(appleId, password, twoFaCode),
                                     IPC_TIMEOUT_MS,
@@ -148,8 +165,7 @@ class NativeServiceClient(
             attachments: List<String>,
     ): Result<String> {
         return try {
-            when (
-                    val event =
+            when (val event =
                             sendCommand(
                                     IpcCommand.SendMessage(
                                             messageId,
@@ -172,10 +188,7 @@ class NativeServiceClient(
 
     override suspend fun getMessages(sinceEpochMs: Long): Result<Unit> {
         return try {
-            when (
-                    val event =
-                            sendCommand(IpcCommand.GetMessages(sinceEpochMs), IPC_TIMEOUT_MS)
-            ) {
+            when (val event = sendCommand(IpcCommand.GetMessages(sinceEpochMs), IPC_TIMEOUT_MS)) {
                 is IpcEvent.Error ->
                         Result.failure(IOException("Native service error: ${event.message}"))
                 // The success response shape is a Rust-side TODO (protocol.rs has no message
@@ -198,10 +211,8 @@ class NativeServiceClient(
             throw IOException(error)
         }
 
-        val socket = LocalSocket()
-        val address = LocalSocketAddress(socketName, LocalSocketAddress.Namespace.ABSTRACT)
-
-        socket.connect(address) // throws on failure
+        val socket = socketFactory()
+        socket.connect() // throws on failure
         socketMutex.withLock { ipcSocket = socket }
 
         // Start the read loop BEFORE emitting Connected so callers cannot race a
@@ -288,8 +299,8 @@ class NativeServiceClient(
 
         val frame = frameData(jsonBytes)
         // LocalSocket.outputStream is non-null in practice — fail loudly if it isn't.
-        socket.outputStream!!.write(frame)
-        socket.outputStream!!.flush()
+        socket.outputStream.write(frame)
+        socket.outputStream.flush()
     }
 
     /**
@@ -298,7 +309,7 @@ class NativeServiceClient(
      */
     private fun readFrame(): IpcEvent {
         val socket = ipcSocket ?: throw IOException("Socket not connected")
-        val input = socket.inputStream ?: throw IOException("No input stream")
+        val input = socket.inputStream
 
         val lenBytes = ByteArray(4)
         var totalRead = 0
@@ -365,12 +376,46 @@ class NativeServiceClient(
                     try {
                         while (coroutineContext.isActive) {
                             val event = readFrame()
-                            // Route to the in-flight command. An event with no waiter is late
-                            // (arrived after a timeout) — log and drop. Log the type only: event
-                            // payloads may carry message content.
-                            val delivered = pendingResponse?.complete(event) == true
-                            if (!delivered) {
-                                Log.w(TAG, "Dropping late or unsolicited IPC event")
+                            when (event) {
+                                is IpcEvent.MessageReceived -> {
+                                    val message =
+                                            PushMessage(
+                                                    messageId = event.messageId,
+                                                    sender = event.sender,
+                                                    timestamp = event.timestamp,
+                                                    envelope =
+                                                            Base64.getDecoder()
+                                                                    .decode(event.envelope),
+                                            )
+                                    if (eventChannel.trySend(NativeEvent.MessageReceived(message))
+                                                    .isFailure
+                                    ) {
+                                        Log.w(
+                                                TAG,
+                                                "Dropping native message event: event buffer full"
+                                        )
+                                    }
+                                }
+                                is IpcEvent.DeliveryReceipt -> {
+                                    if (eventChannel.trySend(
+                                                            NativeEvent.DeliveryReceipt(
+                                                                    event.messageId,
+                                                                    event.deliveryReceiptAt,
+                                                            ),
+                                                    )
+                                                    .isFailure
+                                    ) {
+                                        Log.w(TAG, "Dropping delivery receipt: event buffer full")
+                                    }
+                                }
+                                else -> {
+                                    // These remain the lockstep reply stream. Only one command can
+                                    // be pending because requestMutex is held through its response.
+                                    val delivered = pendingResponse?.complete(event) == true
+                                    if (!delivered) {
+                                        Log.w(TAG, "Dropping late IPC response")
+                                    }
+                                }
                             }
                         }
                     } catch (e: Exception) {
@@ -379,6 +424,29 @@ class NativeServiceClient(
                     }
                 }
     }
+}
+
+/** Minimal socket seam so IPC demultiplexing can be exercised without an Android daemon. */
+internal interface IpcSocketConnection {
+    val inputStream: InputStream
+    val outputStream: OutputStream
+    fun connect()
+    fun close()
+}
+
+private class LocalIpcSocketConnection(private val socketName: String) : IpcSocketConnection {
+    private val socket = LocalSocket()
+
+    override val inputStream: InputStream
+        get() = socket.inputStream ?: throw IOException("No input stream")
+    override val outputStream: OutputStream
+        get() = socket.outputStream ?: throw IOException("No output stream")
+
+    override fun connect() {
+        socket.connect(LocalSocketAddress(socketName, LocalSocketAddress.Namespace.ABSTRACT))
+    }
+
+    override fun close() = socket.close()
 }
 
 /**
@@ -419,7 +487,9 @@ internal sealed class IpcCommand {
     ) : IpcCommand()
 
     /** Fetch messages received since [since] (Unix epoch milliseconds). */
-    @Serializable @SerialName("GET_MESSAGES") data class GetMessages(val since: Long) : IpcCommand()
+    @Serializable
+    @SerialName("GET_MESSAGES")
+    data class GetMessages(val since: Long) : IpcCommand()
 }
 
 /** Events received from the native service. Wire format must match `protocol.rs`'s `Event`. */
@@ -443,6 +513,24 @@ internal sealed class IpcEvent {
 
     /** A command failed or is not yet supported. */
     @Serializable @SerialName("ERROR") data class Error(val message: String) : IpcEvent()
+
+    /** Unsolicited inbound encrypted message; envelope is base64-encoded. */
+    @Serializable
+    @SerialName("MESSAGE_RECEIVED")
+    data class MessageReceived(
+            @SerialName("message_id") val messageId: String,
+            val sender: String,
+            val timestamp: Long,
+            val envelope: String,
+    ) : IpcEvent()
+
+    /** Unsolicited delivery receipt for an outgoing message. */
+    @Serializable
+    @SerialName("DELIVERY_RECEIPT")
+    data class DeliveryReceipt(
+            @SerialName("message_id") val messageId: String,
+            @SerialName("delivery_receipt_at") val deliveryReceiptAt: Long,
+    ) : IpcEvent()
 }
 
 /** Backoff policy for socket reconnection attempts (reuses RelayService pattern). */

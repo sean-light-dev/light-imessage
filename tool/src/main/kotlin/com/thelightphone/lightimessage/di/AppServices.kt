@@ -1,5 +1,6 @@
 package com.thelightphone.lightimessage.di
 
+import android.util.Log
 import com.thelightphone.lightimessage.data.database.ImessageDatabase
 import com.thelightphone.lightimessage.data.datastore.EncryptedTokenRepository
 import com.thelightphone.lightimessage.data.datastore.IPushRegistrationRepository
@@ -21,6 +22,9 @@ import com.thelightphone.lightimessage.domain.codec.IMessageCodec
 import com.thelightphone.lightimessage.domain.codec.MessageCodec
 import com.thelightphone.lightimessage.domain.codec.PlistCodec
 import com.thelightphone.lightimessage.domain.crypto.CryptoEngine
+import com.thelightphone.lightimessage.domain.native.INativeServiceClient
+import com.thelightphone.lightimessage.domain.native.MessageStatusUpdater
+import com.thelightphone.lightimessage.domain.native.NativeEvent
 import com.thelightphone.lightimessage.domain.native.NativeServiceCapability
 import com.thelightphone.lightimessage.domain.native.UnavailableNativeServiceCapability
 import com.thelightphone.lightimessage.domain.relay.IRelayService
@@ -33,6 +37,8 @@ import com.thelightphone.sdk.SealedLightContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
 /**
@@ -81,7 +87,13 @@ class AppServices private constructor(private val lightContext: SealedLightConte
      * capability, so this remains unavailable and deliberately does not construct a socket client.
      */
     val nativeServiceCapability: NativeServiceCapability by lazy {
-        UnavailableNativeServiceCapability()
+        UnavailableNativeServiceCapability().also { capability ->
+            capability.client?.let(::observeNativeEvents)
+        }
+    }
+
+    private val messageStatusUpdater: MessageStatusUpdater by lazy {
+        MessageStatusUpdater(database.messageDao())
     }
 
     val messageCodec: IMessageCodec by lazy { MessageCodec(PlistCodec(), CryptoEngine()) }
@@ -108,6 +120,21 @@ class AppServices private constructor(private val lightContext: SealedLightConte
 
     private val provisionedCodecKeysProvider by lazy {
         ProvisionedCodecKeysProvider(tokenRepository)
+    }
+
+    private fun observeNativeEvents(client: INativeServiceClient) {
+        serviceScope.launch {
+            client.observeEvents().collect { event ->
+                try {
+                    when (event) {
+                        is NativeEvent.MessageReceived -> pushProcessor.processNative(event.message)
+                        is NativeEvent.DeliveryReceipt -> messageStatusUpdater.update(event)
+                    }
+                } catch (error: Exception) {
+                    Log.e("AppServices", "Failed to apply native IPC event", error)
+                }
+            }
+        }
     }
 
     val pushProcessor: PushProcessor by lazy {

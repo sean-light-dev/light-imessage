@@ -126,6 +126,40 @@ class IpcProtocolTest {
     }
 
     @Test
+    fun messageReceivedMatchesNativeServiceShape() {
+        val json =
+                ipcJson.encodeToString(
+                        IpcEvent.serializer(),
+                        IpcEvent.MessageReceived("m1", "alice@example.com", 123, "AQI="),
+                )
+        assertEquals(
+                """{"type":"MESSAGE_RECEIVED","message_id":"m1","sender":"alice@example.com","timestamp":123,"envelope":"AQI="}""",
+                json,
+        )
+        assertEquals(
+                IpcEvent.MessageReceived("m1", "alice@example.com", 123, "AQI="),
+                ipcJson.decodeFromString(IpcEvent.serializer(), json),
+        )
+    }
+
+    @Test
+    fun deliveryReceiptMatchesNativeServiceShape() {
+        val json =
+                ipcJson.encodeToString(
+                        IpcEvent.serializer(),
+                        IpcEvent.DeliveryReceipt("m1", 456),
+                )
+        assertEquals(
+                """{"type":"DELIVERY_RECEIPT","message_id":"m1","delivery_receipt_at":456}""",
+                json,
+        )
+        assertEquals(
+                IpcEvent.DeliveryReceipt("m1", 456),
+                ipcJson.decodeFromString(IpcEvent.serializer(), json),
+        )
+    }
+
+    @Test
     fun unknownFieldsAreIgnoredForForwardCompatibility() {
         val event =
                 ipcJson.decodeFromString(

@@ -1,10 +1,10 @@
 package com.thelightphone.lightimessage.domain.push
 
 /**
- * Data class representing a parsed UnifiedPush notification payload.
+ * Parsed inbound encrypted message shared by UnifiedPush and native IPC delivery paths.
  *
- * Push payloads are JSON-formatted and delivered by the rustpush service. Spec: milestone-2.md §
- * 4.4 (Native Push Notification)
+ * UnifiedPush payloads are JSON-formatted; native IPC carries equivalent message fields directly.
+ * Spec: milestone-2.md § 4.4 (Native Push Notification)
  *
  * @param messageId UUID-formatted message identifier (for deduplication)
  * @param sender iMessage address (tel: or mailto:) of the sender

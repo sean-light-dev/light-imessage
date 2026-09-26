@@ -60,6 +60,19 @@ pub enum Event {
     Ack { message_id: String },
     /// A command failed or is not yet supported.
     Error { message: String },
+    /// An unsolicited inbound message received from the native messaging service.
+    /// `envelope` is base64-encoded, matching the UnifiedPush payload representation.
+    MessageReceived {
+        message_id: String,
+        sender: String,
+        timestamp: i64,
+        envelope: String,
+    },
+    /// An unsolicited delivery receipt for an outgoing message.
+    DeliveryReceipt {
+        message_id: String,
+        delivery_receipt_at: i64,
+    },
 }
 
 /// Reads one length-prefixed JSON frame and decodes it into a [`Command`].
@@ -100,4 +113,49 @@ pub fn write_event<W: Write>(writer: &mut W, event: &Event) -> io::Result<()> {
     writer.write_all(&len.to_be_bytes())?;
     writer.write_all(&payload)?;
     writer.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{write_event, Event};
+
+    fn frame(event: &Event) -> Vec<u8> {
+        let mut frame = Vec::new();
+        write_event(&mut frame, event).unwrap();
+        frame
+    }
+
+    #[test]
+    fn existing_event_frame_is_unchanged() {
+        assert_eq!(
+            frame(&Event::Ack {
+                message_id: "m1".into()
+            }),
+            b"\0\0\0\x20{\"type\":\"ACK\",\"message_id\":\"m1\"}"
+        );
+    }
+
+    #[test]
+    fn message_received_uses_base64_envelope_frame() {
+        assert_eq!(
+            frame(&Event::MessageReceived {
+                message_id: "m1".into(),
+                sender: "alice@example.com".into(),
+                timestamp: 123,
+                envelope: "AQI=".into(),
+            }),
+            b"\0\0\0\x6c{\"type\":\"MESSAGE_RECEIVED\",\"message_id\":\"m1\",\"sender\":\"alice@example.com\",\"timestamp\":123,\"envelope\":\"AQI=\"}",
+        );
+    }
+
+    #[test]
+    fn delivery_receipt_uses_expected_wire_fields() {
+        assert_eq!(
+            frame(&Event::DeliveryReceipt {
+                message_id: "m1".into(),
+                delivery_receipt_at: 456,
+            }),
+            b"\0\0\0\x47{\"type\":\"DELIVERY_RECEIPT\",\"message_id\":\"m1\",\"delivery_receipt_at\":456}",
+        );
+    }
 }

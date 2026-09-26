@@ -85,15 +85,36 @@ class PushProcessor(
         return process(pushMessage, distributorInstance = distributorInstance)
     }
 
-    /** Process a parsed push message. Idempotent: duplicate messageIds are dropped. */
+    /** Process a parsed UnifiedPush message. Idempotent: duplicate messageIds are dropped. */
     suspend fun process(
             push: PushMessage,
             distributorInstance: String = DEFAULT_DISTRIBUTOR_INSTANCE,
             receivedAt: Long = System.currentTimeMillis(),
+    ): Boolean = process(push, distributorInstance, receivedAt, validateDistributor = true)
+
+    /**
+     * Process an event from the trusted native IPC channel through the same decrypt/persist path.
+     */
+    suspend fun processNative(
+            message: PushMessage,
+            receivedAt: Long = System.currentTimeMillis(),
+    ): Boolean =
+            process(
+                    message,
+                    NATIVE_SERVICE_INSTANCE,
+                    receivedAt,
+                    validateDistributor = false,
+            )
+
+    private suspend fun process(
+            push: PushMessage,
+            distributorInstance: String,
+            receivedAt: Long,
+            validateDistributor: Boolean,
     ): Boolean {
         Log.d(TAG, "Processing push: messageId=${push.messageId}, sender=${push.sender}")
 
-        if (pushRegistrationRepository != null) {
+        if (validateDistributor && pushRegistrationRepository != null) {
             val registration = pushRegistrationRepository.getRegistration(distributorInstance)
             if (registration == null) {
                 Log.w(
@@ -406,6 +427,7 @@ class PushProcessor(
         private const val TYPE_TYPING = "TYPING"
         private const val TYPE_UNKNOWN = "UNKNOWN"
         private const val DEFAULT_DISTRIBUTOR_INSTANCE = "unknown"
+        private const val NATIVE_SERVICE_INSTANCE = "native-service"
 
         // Message status constants (from milestone-2.md)
         internal const val STATUS_DRAFT = 0

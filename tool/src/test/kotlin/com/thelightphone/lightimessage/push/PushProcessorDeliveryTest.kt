@@ -3,6 +3,7 @@ package com.thelightphone.lightimessage.push
 import com.thelightphone.lightimessage.data.dao.MessageDao
 import com.thelightphone.lightimessage.data.dao.ThreadDao
 import com.thelightphone.lightimessage.data.database.ImessageDatabase
+import com.thelightphone.lightimessage.data.datastore.IPushRegistrationRepository
 import com.thelightphone.lightimessage.data.entity.MessageEntity
 import com.thelightphone.lightimessage.data.entity.ThreadEntity
 import com.thelightphone.lightimessage.domain.codec.MessageCodec
@@ -53,15 +54,22 @@ class PushProcessorDeliveryTest {
         whenever(database.messageDao()).thenReturn(messageDao)
         whenever(database.threadDao()).thenReturn(threadDao)
 
+        val registrationRepository = mock<IPushRegistrationRepository>()
         val processor =
                 PushProcessor(
                         database = database,
                         messageCodec = codec,
                         codecKeysProvider = { CodecKeys(senderCertificate, recipientPrivateKey) },
+                        pushRegistrationRepository = registrationRepository,
                         transaction = { block -> block() },
                 )
 
-        assertTrue(processor.process(PushMessage("message-4", "alice@example.com", 123L, envelope)))
+        assertTrue(
+                processor.processNative(
+                        PushMessage("message-4", "alice@example.com", 123L, envelope),
+                ),
+        )
+        verify(registrationRepository, org.mockito.kotlin.never()).getRegistration(any())
 
         val message = argumentCaptor<MessageEntity>()
         verify(messageDao).insert(message.capture())

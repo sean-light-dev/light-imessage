@@ -1,16 +1,17 @@
 package com.thelightphone.lightimessage.domain.native
 
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Client interface for communicating with the rustpush native service via Unix domain socket IPC.
  *
- * Wire contract: `native-service/src/protocol.rs` — length-prefixed JSON frames (4-byte
- * big-endian length + UTF-8 JSON) carrying serde internally-tagged messages (`"type"` in
+ * Wire contract: `native-service/src/protocol.rs` — length-prefixed JSON frames (4-byte big-endian
+ * length + UTF-8 JSON) carrying serde internally-tagged messages (`"type"` in
  * SCREAMING_SNAKE_CASE). Commands: `PING`, `ACTIVATE`, `SEND_MESSAGE`, `GET_MESSAGES`. Events:
- * `PONG`, `ACTIVATION_STATUS`, `ACK`, `ERROR`. The service answers every command with exactly one
- * event, in order — there are no correlation IDs; requests are serialized through a single
- * request lock.
+ * command replies `PONG`, `ACTIVATION_STATUS`, `ACK`, `ERROR` remain lockstep; unsolicited
+ * `MESSAGE_RECEIVED` and `DELIVERY_RECEIPT` frames are observed separately with [observeEvents].
+ * There are no correlation IDs; requests are serialized through one request lock.
  *
  * Spec: milestone-3.md § 4.1–4.5 (deployment, activation, send, receive, heartbeat).
  */
@@ -20,6 +21,9 @@ interface INativeServiceClient {
      * Disconnected.
      */
     val connectionState: StateFlow<NativeServiceState>
+
+    /** Unsolicited native IPC events, independent of command request/response traffic. */
+    fun observeEvents(): Flow<NativeEvent>
 
     /**
      * Establish the socket connection to the native service (abstract namespace, name
@@ -39,8 +43,8 @@ interface INativeServiceClient {
     suspend fun disconnect(): Result<Unit>
 
     /**
-     * Drive one-time Apple ID activation in the native service (`ACTIVATE`). [twoFaCode] is sent
-     * on the second round trip once the user has supplied the 2FA challenge.
+     * Drive one-time Apple ID activation in the native service (`ACTIVATE`). [twoFaCode] is sent on
+     * the second round trip once the user has supplied the 2FA challenge.
      *
      * @return Result.success with the latest [ActivationStatus]; Result.failure on timeout,
      * transport error, or an `ERROR` event from the service
@@ -54,8 +58,8 @@ interface INativeServiceClient {
     /**
      * Send an outgoing iMessage via the native service (`SEND_MESSAGE`).
      *
-     * @return Result.success with the acknowledged messageId; Result.failure on timeout,
-     * transport error, or an `ERROR` event from the service
+     * @return Result.success with the acknowledged messageId; Result.failure on timeout, transport
+     * error, or an `ERROR` event from the service
      */
     suspend fun sendMessage(
             messageId: String,

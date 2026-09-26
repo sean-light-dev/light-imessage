@@ -51,7 +51,7 @@ interface MessageDao {
     fun getUnread(): Flow<List<MessageEntity>>
 
     @Query(
-            "UPDATE messages SET status = 2, deliveryReceiptAt = :deliveryReceiptAt WHERE id = :messageId",
+            "UPDATE messages SET status = CASE WHEN status = 4 THEN 4 ELSE 3 END, deliveryReceiptAt = :deliveryReceiptAt WHERE id = :messageId AND isOutgoing = 1",
     )
     suspend fun markDelivered(
             messageId: String,
