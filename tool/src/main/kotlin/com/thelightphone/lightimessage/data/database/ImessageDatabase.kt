@@ -2,27 +2,28 @@ package com.thelightphone.lightimessage.data.database
 
 import androidx.room.Database
 import androidx.room.RoomDatabase
-import com.thelightphone.sdk.SealedLightContext
-import com.thelightphone.sdk.buildDatabase
 import com.thelightphone.lightimessage.data.dao.AttachmentDao
 import com.thelightphone.lightimessage.data.dao.ContactDao
 import com.thelightphone.lightimessage.data.dao.DomainEventDao
 import com.thelightphone.lightimessage.data.dao.MessageDao
+import com.thelightphone.lightimessage.data.dao.PushDao
 import com.thelightphone.lightimessage.data.dao.ThreadDao
 import com.thelightphone.lightimessage.data.entity.AttachmentEntity
 import com.thelightphone.lightimessage.data.entity.ContactEntity
 import com.thelightphone.lightimessage.data.entity.DomainEventEntity
+import com.thelightphone.lightimessage.data.entity.IncomingPushEntity
 import com.thelightphone.lightimessage.data.entity.MessageEntity
 import com.thelightphone.lightimessage.data.entity.ThreadEntity
+import com.thelightphone.sdk.SealedLightContext
+import com.thelightphone.sdk.buildDatabase
 
 /**
  * Room database for iMessage cache. Single canonical database for all persistent state.
  *
  * Spec: milestone-2.md § 2 (Data Model); ADR-006 (Room and DataStore).
  *
- * Note: [exportSchema] is `false` until a `room.schemaLocation` KSP arg is wired in
- * `tool/build.gradle.kts`. Flip to `true` and commit the generated JSON under `tool/schemas/`
- * before shipping migrations.
+ * Schema version 2 adds durable inbound-push receipts. Migrations are registered in [getInstance]
+ * because the SDK owns the Room builder.
  */
 @Database(
         entities =
@@ -32,12 +33,15 @@ import com.thelightphone.lightimessage.data.entity.ThreadEntity
                         ContactEntity::class,
                         AttachmentEntity::class,
                         DomainEventEntity::class,
+                        IncomingPushEntity::class,
                 ],
-        version = 1,
+        version = 2,
         exportSchema = false,
 )
 abstract class ImessageDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
+
+    abstract fun pushDao(): PushDao
 
     abstract fun threadDao(): ThreadDao
 
@@ -54,15 +58,18 @@ abstract class ImessageDatabase : RoomDatabase() {
 
         /**
          * Get (or create) the singleton database. The Light SDK sandbox does not expose a raw
-         * `Context` to tool code, so the database is built from the [SealedLightContext] handed
-         * to screens and background jobs.
+         * `Context` to tool code, so the database is built from the [SealedLightContext] handed to
+         * screens and background jobs.
          */
         fun getInstance(lightContext: SealedLightContext): ImessageDatabase =
                 INSTANCE
                         ?: synchronized(this) {
                             INSTANCE
-                                    ?: lightContext
-                                            .buildDatabase(ImessageDatabase::class.java, DB_NAME)
+                                    ?: lightContext.buildDatabase(
+                                                    ImessageDatabase::class.java,
+                                                    DB_NAME,
+                                                    MIGRATION_1_2
+                                            )
                                             .also { INSTANCE = it }
                         }
     }

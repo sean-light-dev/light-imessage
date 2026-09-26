@@ -4,14 +4,17 @@ import android.util.Base64
 import android.util.Log
 import androidx.room.withTransaction
 import com.thelightphone.lightimessage.data.database.ImessageDatabase
+import com.thelightphone.lightimessage.data.entity.IncomingPushEntity
 import com.thelightphone.lightimessage.data.entity.MessageEntity
 import com.thelightphone.lightimessage.data.entity.ThreadEntity
+import com.thelightphone.lightimessage.data.repository.IPushProcessingRepository
 import com.thelightphone.lightimessage.domain.auth.AuthManager
 import com.thelightphone.lightimessage.domain.codec.IMessageCodec
 import com.thelightphone.lightimessage.domain.push.PushMessage
 import java.io.IOException
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
+import java.util.Base64 as JvmBase64
 import java.util.UUID
 import java.util.concurrent.TimeoutException
 import kotlinx.serialization.Serializable
@@ -47,6 +50,7 @@ class PushProcessor(
         private val messageCodec: IMessageCodec,
         private val authManager: AuthManager? = null,
         private val codecKeysProvider: () -> CodecKeys?,
+        private val pushRepository: IPushProcessingRepository? = null,
 ) {
     /**
      * Entry point for a raw push payload (bytes as delivered by UnifiedPush).
@@ -64,16 +68,43 @@ class PushProcessor(
         return process(pushMessage)
     }
 
-    /**
-     * Process a parsed push message. Idempotent: duplicate messageIds are dropped.
-     */
-    suspend fun process(push: PushMessage): Boolean {
+    /** Process a parsed push message. Idempotent: duplicate messageIds are dropped. */
+    suspend fun process(
+            push: PushMessage,
+            distributorInstance: String = DEFAULT_DISTRIBUTOR_INSTANCE,
+            receivedAt: Long = System.currentTimeMillis(),
+    ): Boolean {
         Log.d(TAG, "Processing push: messageId=${push.messageId}, sender=${push.sender}")
+
+        val recordResult =
+                pushRepository?.recordPush(
+                        IncomingPushEntity(
+                                id = push.messageId,
+                                type = TYPE_MESSAGE_DELIVERY,
+                                payloadBase64 =
+                                        JvmBase64.getEncoder().encodeToString(push.envelope),
+                                distributorInstance = distributorInstance,
+                                receivedAt = receivedAt,
+                        ),
+                )
+        if (recordResult?.isFailure == true) {
+            Log.e(TAG, "Failed to record push ${push.messageId}", recordResult.exceptionOrNull())
+            return false
+        }
 
         return try {
             // 1. Existence-based dedup — if the message already lives in the DB, drop the push.
             if (database.messageDao().existsById(push.messageId)) {
                 Log.d(TAG, "Duplicate message dropped: ${push.messageId}")
+                val markResult = pushRepository?.markProcessed(push.messageId)
+                if (markResult?.isFailure == true) {
+                    Log.e(
+                            TAG,
+                            "Failed to mark duplicate push ${push.messageId} processed",
+                            markResult.exceptionOrNull()
+                    )
+                    return false
+                }
                 return true
             }
 
@@ -82,22 +113,26 @@ class PushProcessor(
             //    this state, which we reproduce (loudly) here.
             val keys = codecKeysProvider()
             if (keys == null) {
-                Log.e(
-                        TAG,
-                        "No codec key material available (auth not provisioned); dropping ${push.messageId}",
-                )
-                return false
+                val reason = "No codec key material available"
+                Log.e(TAG, "$reason; dropping ${push.messageId}")
+                return fail(push.messageId, reason)
             }
 
             // 3. Decrypt envelope. decodeEnvelope returns a MessagePayload directly — the body
             //    is a first-class field, so no JSON re-parse is needed.
-            val payload =
-                    messageCodec
-                            .decodeEnvelope(push.envelope, keys.senderCert, keys.recipientKey)
-                            .getOrElse { e ->
-                                Log.e(TAG, "Failed to decode envelope for ${push.messageId}", e)
-                                return false
-                            }
+            val payloadResult =
+                    messageCodec.decodeEnvelope(push.envelope, keys.senderCert, keys.recipientKey)
+            if (payloadResult.isFailure) {
+                val reason =
+                        "Envelope decryption failed: ${payloadResult.exceptionOrNull()?.message ?: "unknown error"}"
+                Log.e(
+                        TAG,
+                        "Failed to decode envelope for ${push.messageId}",
+                        payloadResult.exceptionOrNull()
+                )
+                return fail(push.messageId, reason)
+            }
+            val payload = payloadResult.getOrThrow()
 
             // 4. Derive threadId from sender and device address (own phone number). If the device
             //    address is not yet available from AuthManager (auth not complete), fall back to
@@ -162,6 +197,15 @@ class PushProcessor(
             // 7. Send ACK to relay (placeholder for future implementation).
             sendAckToRelay(push.messageId)
 
+            val markResult = pushRepository?.markProcessed(push.messageId)
+            if (markResult?.isFailure == true) {
+                Log.e(
+                        TAG,
+                        "Failed to mark push ${push.messageId} processed",
+                        markResult.exceptionOrNull()
+                )
+                return false
+            }
             true
         } catch (e: Exception) {
             when (e) {
@@ -176,8 +220,16 @@ class PushProcessor(
                     Log.e(TAG, "Permanent error processing push ${push.messageId}", e)
                 }
             }
-            false
+            fail(push.messageId, e.message ?: e::class.simpleName ?: "Processing failed")
         }
+    }
+
+    private suspend fun fail(pushId: String, reason: String): Boolean {
+        val markResult = pushRepository?.markFailed(pushId, reason)
+        if (markResult?.isFailure == true) {
+            Log.e(TAG, "Failed to record failure for push $pushId", markResult.exceptionOrNull())
+        }
+        return false
     }
 
     /**
@@ -240,6 +292,8 @@ class PushProcessor(
 
     companion object {
         private const val TAG = "PushProcessor"
+        private const val TYPE_MESSAGE_DELIVERY = "MESSAGE_DELIVERY"
+        private const val DEFAULT_DISTRIBUTOR_INSTANCE = "unknown"
 
         // Message status constants (from milestone-2.md)
         internal const val STATUS_DRAFT = 0

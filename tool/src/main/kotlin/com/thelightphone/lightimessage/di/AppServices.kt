@@ -11,6 +11,7 @@ import com.thelightphone.lightimessage.data.repository.ContactRepository
 import com.thelightphone.lightimessage.data.repository.IMessageRepository
 import com.thelightphone.lightimessage.data.repository.IThreadRepository
 import com.thelightphone.lightimessage.data.repository.MessageRepository
+import com.thelightphone.lightimessage.data.repository.PushProcessingRepository
 import com.thelightphone.lightimessage.data.repository.ThreadRepository
 import com.thelightphone.lightimessage.domain.auth.AuthManager
 import com.thelightphone.lightimessage.domain.auth.AuthStateMachine
@@ -29,15 +30,15 @@ import okhttp3.OkHttpClient
 
 /**
  * Application-wide service locator. Replaces the `ImeApplication` DI wiring from the pre-SDK
- * codebase: the Light SDK owns the `Application` class ([com.thelightphone.sdk.LightSdkApplication]),
- * so tool-level singletons are held here instead.
+ * codebase: the Light SDK owns the `Application` class ([com.thelightphone.sdk.LightSdkApplication]
+ * ), so tool-level singletons are held here instead.
  *
  * Instances are created lazily from the first [SealedLightContext] the SDK hands us (via a
- * [com.thelightphone.sdk.LightScreen] or a [com.thelightphone.sdk.LightJob] handler) and cached
- * for the process lifetime.
+ * [com.thelightphone.sdk.LightScreen] or a [com.thelightphone.sdk.LightJob] handler) and cached for
+ * the process lifetime.
  *
- * Note: `onPushNotification` receives no context, so push processing is only possible once a
- * screen or job has initialized the locator at least once in the process. See
+ * Note: `onPushNotification` receives no context, so push processing is only possible once a screen
+ * or job has initialized the locator at least once in the process. See
  * [com.thelightphone.lightimessage.ImessageEntryPoint].
  */
 class AppServices private constructor(lightContext: SealedLightContext) {
@@ -52,6 +53,9 @@ class AppServices private constructor(lightContext: SealedLightContext) {
     val messageRepository: IMessageRepository by lazy { MessageRepository(database) }
     val threadRepository: IThreadRepository by lazy { ThreadRepository(database) }
     val contactRepository: ContactRepository by lazy { ContactRepository(database) }
+    val pushProcessingRepository: PushProcessingRepository by lazy {
+        PushProcessingRepository(database.pushDao())
+    }
 
     /** Shared OkHttp client for relay HTTP + WebSocket transport. */
     val okHttpClient: OkHttpClient by lazy {
@@ -89,6 +93,7 @@ class AppServices private constructor(lightContext: SealedLightContext) {
         PushProcessor(
                 database = database,
                 messageCodec = messageCodec,
+                pushRepository = pushProcessingRepository,
                 authManager = authManager,
                 // TODO(F-4): sender cert / recipient key are blocked on auth provisioning
                 // completing. Until key material exists, inbound envelopes cannot be decrypted;
