@@ -1,6 +1,5 @@
 package com.thelightphone.lightimessage.push
 
-import android.util.Base64
 import android.util.Log
 import androidx.room.withTransaction
 import com.thelightphone.lightimessage.data.database.ImessageDatabase
@@ -372,11 +371,13 @@ class PushProcessor(
     private fun parsePushPayload(json: String): PushMessage {
         val dto = Json.decodeFromString<PushPayloadDto>(json)
 
-        // Decode base64 envelope. Pin to NO_WRAP to match the rustpush emitter — DEFAULT would
-        // silently accept newline-wrapped input and could mask corruption.
+        // The native emitter sends standard base64; reject whitespace and non-alphabet bytes.
         val envelopeBytes =
-                Base64.decode(dto.envelope, Base64.NO_WRAP)
-                        ?: throw IllegalArgumentException("Invalid base64 envelope")
+                try {
+                    JvmBase64.getDecoder().decode(dto.envelope)
+                } catch (e: IllegalArgumentException) {
+                    throw IllegalArgumentException("Invalid base64 envelope", e)
+                }
 
         return PushMessage(
                 messageId = dto.message_id,

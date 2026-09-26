@@ -109,6 +109,38 @@ class AuthFlowIntegrationTest {
         assertEquals("Expiry should match", expiresAt, sessionState.expiresAt)
     }
 
+    @Test
+    fun `direct session login provisions hardware through relay and provisioning fakes`() =
+            runTest {
+                val relay = FixtureRelayClient()
+                val provisioning = FixtureProvisioningClient()
+                val tokenRepository = org.mockito.kotlin.mock<ITokenRepository>()
+                whenever(tokenRepository.saveAppleId("test@icloud.com"))
+                        .thenReturn(Result.success(Unit))
+                whenever(tokenRepository.saveSessionToken("session-1", 1234L))
+                        .thenReturn(Result.success(Unit))
+                whenever(tokenRepository.saveHardwareInfo(byteArrayOf(1, 2, 3)))
+                        .thenReturn(Result.success(Unit))
+                val machine =
+                        AuthStateMachine(
+                                tokenRepository = tokenRepository,
+                                relayClient = relay,
+                                nativeClient = provisioning,
+                                scope = this,
+                        )
+
+                val result = machine.requestLogin(AppleId("test@icloud.com"), "fixture-password")
+
+                assertTrue(result.isSuccess)
+                assertEquals(
+                        AuthState.SessionEstablished("session-1", 1234L),
+                        machine.getState().value
+                )
+                assertEquals("test@icloud.com" to "fixture-password", relay.credentials)
+                assertEquals("session-1" to "test@icloud.com", provisioning.registration)
+                assertEquals("device-1", provisioning.polledDeviceId)
+            }
+
     // ========== Login Failure Scenarios ==========
 
     /**
@@ -321,6 +353,49 @@ class AuthFlowIntegrationTest {
     }
 
     // ========== Helper Methods ==========
+
+    private class FixtureRelayClient : IRelayHttpClient {
+        var credentials: Pair<String, String>? = null
+
+        override suspend fun loginWithCredentials(
+                email: String,
+                password: String
+        ): Result<LoginResponse> {
+            credentials = email to password
+            return Result.success(LoginResponse.SessionToken("session-1", 1234L))
+        }
+
+        override suspend fun submitTwoFactor(challenge: String, code: String) =
+                Result.failure<SessionResponse>(UnsupportedOperationException())
+
+        override suspend fun resendTwoFactor(challenge: String) =
+                Result.failure<Unit>(UnsupportedOperationException())
+
+        override suspend fun refreshToken(token: String) =
+                Result.failure<SessionResponse>(UnsupportedOperationException())
+    }
+
+    private class FixtureProvisioningClient : IProvisioningClient {
+        var registration: Pair<String, String>? = null
+        var polledDeviceId: String? = null
+
+        override suspend fun registerHardware(
+                sessionToken: String,
+                email: String
+        ): Result<HardwareInfo> {
+            registration = sessionToken to email
+            return Result.success(HardwareInfo("device-1", byteArrayOf(1, 2, 3)))
+        }
+
+        override suspend fun pollActivationStatus(
+                deviceId: String,
+                maxAttempts: Int,
+                pollIntervalMs: Long,
+        ): Result<ActivationStatus> {
+            polledDeviceId = deviceId
+            return Result.success(ActivationStatus.Activated)
+        }
+    }
 
     private fun createAuthStateMachine(): AuthStateMachine =
             AuthStateMachine(

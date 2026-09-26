@@ -34,13 +34,27 @@ even before the migration.
 | APNs TLS in rustpush | **Pending** — Rust handlers stubbed |
 | One-time attestation | **Adapted** — via `ProvisioningHttpClient` (HTTPS), not via rustpush IPC |
 | UnifiedPush bridge in rustpush | **Pending** — and the Kotlin receive side is now SDK-owned |
-| `NativeServiceClient` + heartbeat | **Implemented as code, unwired** — single-pong-timeout reconnect (not 3-miss); states `Disconnected/Connecting/Connected/Reconnecting/Failed` (no launcher states) |
+| `NativeServiceClient` + heartbeat | **Implemented as code, unwired** — fake-socket send/ACK, unsolicited events, and reconnect are JVM-tested; the 30s interval is asserted without waiting; no OS capability or native process is connected |
 | Kotlin `PushReceiver` | **Removed by sandbox** — see ADR-005 amendment |
 | `PushHandler` (4 push types) | **Partially adapted** — `PushProcessor` handles delivery only; payloads carry no `type` field |
-| IPC events (`MESSAGE_RECEIVED`/`ACTIVATION_STATUS`/`ERROR`) | **Pending** — defined in Rust, not consumed by Kotlin (no `observeEvents`) |
-| IPC commands (`SEND_MESSAGE`/`ACTIVATE`/`PING`) | **Pending** — Kotlin client speaks the M2-era command set; wire formats don't match (see drift register below) |
+| IPC events (`MESSAGE_RECEIVED`/`DELIVERY_RECEIPT`) | **Implemented as code and fake-socket tested** — #9 routes unsolicited events through `observeEvents`; native messages exercise fixture-key decrypt/persist and receipts update status; runtime remains unwired pending #7/#8 |
+| IPC commands (`SEND_MESSAGE`/`ACTIVATE`/`PING`) | **Wire/client tested, service-dependent paths blocked** — Kotlin frames match the Rust contract and fake-socket SEND/ACK passes; real Rust handlers remain pending #8 |
 | Room persistence on push | **Implemented** via `PushProcessor` |
 | WorkManager deferred sync | **Adapted** — periodic-only; no expedited per-push sync |
+
+#### Issue #10 — sandbox JVM integration coverage
+
+The focused harness runs as part of `:tool:testDebugUnitTest` using the existing Kotlin test, coroutine-test, Mockito, and BouncyCastle dependencies. It uses no `androidx.test` or Robolectric.
+
+| Path | JVM coverage | Runtime-dependent remainder |
+| --- | --- | --- |
+| Activation | Real `AuthStateMachine` with deterministic relay/provisioning fakes and token-store seam | No Apple login/activation success is simulated beyond those fakes |
+| Native send/events | Real `NativeServiceClient` with a length-prefixed fake socket; SEND/ACK, receipt update, inbound MESSAGE_RECEIVED → real crypto decode → DAO/repository writes, and reconnect on socket loss | No LightOS supervisor socket or rustpush process; #7/#8 |
+| Heartbeat | The exact 30,000 ms production interval is asserted without sleeping | No timed PING/PONG timeout cycle is run |
+| UnifiedPush | Raw JSON/base64 decode, fixture-key MESSAGE_DELIVERY decrypt/persist, token validation, duplicate suppression, malformed base64/decrypt failure, and unknown-type recording | Direct processor entry only; no real distributor callback |
+| Persistence | DAO/repository seams verify message/thread/push writes and failure state | No Android Room engine or on-device transaction is started |
+
+These tests prove Kotlin behavior against deterministic protocol/crypto fixtures, not Apple, APNs, a rustpush handler, or Android runtime success. A real supervisor/native-service integration and on-device Room/distributor verification remain follow-ups when #7/#8 and the sandbox permit them.
 
 ### Milestone 4 — Auth & Session
 

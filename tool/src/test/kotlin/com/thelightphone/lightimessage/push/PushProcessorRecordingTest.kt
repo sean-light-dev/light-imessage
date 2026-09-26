@@ -95,6 +95,32 @@ class PushProcessorRecordingTest {
     }
 
     @Test
+    fun `raw UnifiedPush envelope base64 is decoded before recording`() = runTest {
+        val repository = RecordingRepository()
+        val processor = processor(repository)
+        val raw =
+                """{"message_id":"wake-encoded","sender":"alice@example.com","timestamp":123,"type":"WAKE","envelope":"AQI="}""".toByteArray()
+
+        assertTrue(processor.process(raw, distributorInstance = "remote"))
+
+        assertEquals("AQI=", repository.recorded.single().payloadBase64)
+        assertTrue(repository.failed.isEmpty())
+    }
+
+    @Test
+    fun `invalid base64 is recorded as a failed push`() = runTest {
+        val repository = RecordingRepository()
+        val processor = processor(repository)
+        val raw =
+                """{"message_id":"bad-envelope","sender":"alice@example.com","timestamp":123,"type":"MESSAGE_DELIVERY","envelope":"%%%"}""".toByteArray()
+
+        assertFalse(processor.process(raw, distributorInstance = "remote"))
+
+        assertEquals("bad-envelope", repository.recorded.single().id)
+        assertEquals("Invalid base64 envelope", repository.failed.single().second)
+    }
+
+    @Test
     fun `unknown type is recorded as failed without touching message processing`() = runTest {
         val messageDao = mock<MessageDao>()
         val database = mock<ImessageDatabase>()

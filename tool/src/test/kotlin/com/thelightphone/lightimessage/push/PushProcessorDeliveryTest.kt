@@ -4,8 +4,11 @@ import com.thelightphone.lightimessage.data.dao.MessageDao
 import com.thelightphone.lightimessage.data.dao.ThreadDao
 import com.thelightphone.lightimessage.data.database.ImessageDatabase
 import com.thelightphone.lightimessage.data.datastore.IPushRegistrationRepository
+import com.thelightphone.lightimessage.data.datastore.PushRegistration
+import com.thelightphone.lightimessage.data.entity.IncomingPushEntity
 import com.thelightphone.lightimessage.data.entity.MessageEntity
 import com.thelightphone.lightimessage.data.entity.ThreadEntity
+import com.thelightphone.lightimessage.data.repository.IPushProcessingRepository
 import com.thelightphone.lightimessage.domain.codec.MessageCodec
 import com.thelightphone.lightimessage.domain.codec.MessagePayload
 import com.thelightphone.lightimessage.domain.codec.PlistCodec
@@ -17,6 +20,7 @@ import java.security.cert.X509Certificate
 import java.util.Date
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.coroutines.test.runTest
 import org.bouncycastle.asn1.x500.X500Name
@@ -31,7 +35,7 @@ import org.mockito.kotlin.whenever
 
 class PushProcessorDeliveryTest {
     @Test
-    fun `MESSAGE_DELIVERY decrypts fixture envelope and persists message`() = runTest {
+    fun `UnifiedPush base64 envelope decrypts and persists with registered token`() = runTest {
         val crypto = CryptoEngine()
         val codec = MessageCodec(PlistCodec(), crypto)
         val (recipientPublicKey, recipientPrivateKey) = crypto.generateRsaKeyPair()
@@ -48,13 +52,24 @@ class PushProcessorDeliveryTest {
                 codec.encodeEnvelope(payload, recipientPublicKey, senderPrivateKey).getOrThrow()
         val messageDao = mock<MessageDao>()
         val threadDao = mock<ThreadDao>()
-        whenever(messageDao.existsById("message-4")).thenReturn(false)
+        whenever(messageDao.existsById("message-4")).thenReturn(false, true)
         whenever(threadDao.existsById(any())).thenReturn(false)
         val database = mock<ImessageDatabase>()
         whenever(database.messageDao()).thenReturn(messageDao)
         whenever(database.threadDao()).thenReturn(threadDao)
 
         val registrationRepository = mock<IPushRegistrationRepository>()
+        whenever(registrationRepository.getRegistration("remote"))
+                .thenReturn(
+                        PushRegistration(
+                                "registration-1",
+                                "org.example.distributor",
+                                "https://push/remote",
+                                "remote",
+                                "token-1",
+                                123L,
+                        ),
+                )
         val processor =
                 PushProcessor(
                         database = database,
@@ -63,13 +78,12 @@ class PushProcessorDeliveryTest {
                         pushRegistrationRepository = registrationRepository,
                         transaction = { block -> block() },
                 )
+        val rawPayload =
+                """{"message_id":"message-4","sender":"alice@example.com","timestamp":123,"type":"MESSAGE_DELIVERY","envelope":"${java.util.Base64.getEncoder().encodeToString(envelope)}","distributor_token":"token-1"}""".toByteArray()
 
-        assertTrue(
-                processor.processNative(
-                        PushMessage("message-4", "alice@example.com", 123L, envelope),
-                ),
-        )
-        verify(registrationRepository, org.mockito.kotlin.never()).getRegistration(any())
+        assertTrue(processor.process(rawPayload, distributorInstance = "remote"))
+        assertTrue(processor.process(rawPayload, distributorInstance = "remote"))
+        verify(registrationRepository, org.mockito.kotlin.times(2)).getRegistration("remote")
 
         val message = argumentCaptor<MessageEntity>()
         verify(messageDao).insert(message.capture())
@@ -79,6 +93,59 @@ class PushProcessorDeliveryTest {
         val thread = argumentCaptor<ThreadEntity>()
         verify(threadDao).insert(thread.capture())
         assertEquals("known body", thread.firstValue.lastMessage)
+    }
+
+    @Test
+    fun `decrypt failure is recorded and does not persist a message`() = runTest {
+        val crypto = CryptoEngine()
+        val codec = MessageCodec(PlistCodec(), crypto)
+        val (senderPublicKey, senderPrivateKey) = crypto.generateEcdsaKeyPair()
+        val senderCertificate = createCertificate(senderPublicKey, senderPrivateKey)
+        val (_, recipientPrivateKey) = crypto.generateRsaKeyPair()
+        val messageDao = mock<MessageDao>()
+        val database = mock<ImessageDatabase>()
+        whenever(database.messageDao()).thenReturn(messageDao)
+        whenever(messageDao.existsById("bad-envelope")).thenReturn(false)
+        val repository = RecordingRepository()
+        val processor =
+                PushProcessor(
+                        database = database,
+                        messageCodec = codec,
+                        codecKeysProvider = { CodecKeys(senderCertificate, recipientPrivateKey) },
+                        pushRepository = repository,
+                        transaction = { block -> block() },
+                )
+
+        assertFalse(
+                processor.processNative(
+                        PushMessage("bad-envelope", "alice@example.com", 123L, byteArrayOf(1, 2)),
+                ),
+        )
+
+        assertEquals("AQI=", repository.recorded.single().payloadBase64)
+        assertTrue(repository.failed.single().second.startsWith("Envelope decryption failed:"))
+        verify(messageDao, org.mockito.kotlin.never()).insert(any())
+    }
+
+    private class RecordingRepository : IPushProcessingRepository {
+        val recorded = mutableListOf<IncomingPushEntity>()
+        val failed = mutableListOf<Pair<String, String>>()
+
+        override suspend fun recordPush(
+                push: IncomingPushEntity,
+        ): Result<Unit> {
+            recorded += push
+            return Result.success(Unit)
+        }
+
+        override suspend fun markProcessed(pushId: String) = Result.success(Unit)
+
+        override suspend fun markFailed(pushId: String, failureReason: String): Result<Unit> {
+            failed += pushId to failureReason
+            return Result.success(Unit)
+        }
+
+        override suspend fun getUnprocessed() = recorded
     }
 
     private fun createCertificate(

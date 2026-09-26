@@ -32,6 +32,8 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
+internal const val NATIVE_HEARTBEAT_INTERVAL_MS = 30_000L
+
 /**
  * Unix domain socket IPC client for the rustpush native service.
  *
@@ -94,7 +96,6 @@ internal constructor(
         /** Matches `protocol.rs`'s `MAX_FRAME_LEN`. */
         private const val MAX_FRAME_SIZE = 16 * 1024 * 1024
         private const val IPC_TIMEOUT_MS = 10_000L // 10 seconds
-        private const val HEARTBEAT_INTERVAL_MS = 30_000L // 30 seconds
         private const val PONG_TIMEOUT_MS = 5_000L // 5 seconds
     }
 
@@ -352,7 +353,7 @@ internal constructor(
         keepaliveJob =
                 scope.launch {
                     while (coroutineContext.isActive) {
-                        delay(HEARTBEAT_INTERVAL_MS)
+                        delay(NATIVE_HEARTBEAT_INTERVAL_MS)
                         try {
                             sendCommand(IpcCommand.Ping, PONG_TIMEOUT_MS)
                         } catch (e: Exception) {
