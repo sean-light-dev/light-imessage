@@ -7,9 +7,8 @@ package com.thelightphone.lightimessage.data.provisioning
  * activation status. Distinct from `domain.native.INativeServiceClient`, which speaks to a local
  * IPC (Unix domain) socket exposed by the Rust native service.
  *
- * TODO(provisioning): no production implementation exists yet — only test mocks reference this
- * interface today. Wire up a real HTTP client (OkHttp / Ktor) once the provisioning endpoint spec
- * is finalized. Tracked as a known gap outside of the auth-refactor scope.
+ * The production implementation uses the shared OkHttp client supplied by AppServices and the
+ * finalized relay provisioning endpoints.
  */
 interface IProvisioningClient {
     /**

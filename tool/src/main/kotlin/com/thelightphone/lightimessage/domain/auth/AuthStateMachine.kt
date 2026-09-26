@@ -3,6 +3,7 @@ package com.thelightphone.lightimessage.domain.auth
 import com.thelightphone.lightimessage.data.datastore.ITokenRepository
 import com.thelightphone.lightimessage.data.provisioning.ActivationStatus
 import com.thelightphone.lightimessage.data.provisioning.IProvisioningClient
+import com.thelightphone.lightimessage.data.provisioning.ProvisioningFailure
 import com.thelightphone.lightimessage.data.relay.IRelayHttpClient
 import com.thelightphone.lightimessage.data.relay.LoginResponse
 import kotlin.math.min
@@ -394,7 +395,9 @@ class AuthStateMachine(
      * different HTTP client leaks through (e.g., Retrofit `HttpException`) it will not be
      * classified here; callers should keep the relay layer's error mapping up to date.
      */
-    private fun isAuthFailure(e: Throwable): Boolean = e is UnauthorizedException
+    private fun isAuthFailure(e: Throwable): Boolean =
+            e is UnauthorizedException ||
+                    (e is ProvisioningFailure.HttpError && e.statusCode in 401..403)
 
     /**
      * Maps a raw exception to a safe, user-facing message. Upstream exceptions may contain the
@@ -408,6 +411,10 @@ class AuthStateMachine(
             is IllegalArgumentException -> e.message ?: fallback
             is IllegalStateException -> e.message ?: fallback
             is UnauthorizedException -> "Authentication failed. Please log in again."
+            is ProvisioningFailure.HttpError ->
+                    "Provisioning request failed (HTTP ${e.statusCode})."
+            is ProvisioningFailure.MalformedResponse ->
+                    "Provisioning server returned an invalid response."
             else -> fallback
         }
     }
