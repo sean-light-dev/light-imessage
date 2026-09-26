@@ -15,6 +15,10 @@ interface LightEntryPoint {
 
     suspend fun onPushNotification(data: ByteArray): Unit = Unit
 
+    /** Push callback including the UnifiedPush registration instance. */
+    suspend fun onPushNotification(data: ByteArray, instance: String): Unit =
+            onPushNotification(data)
+
     fun getToolManagerManifest(): ClientToolManifest? = null
 
     suspend fun onToolManagerDataUpdate(): Unit = Unit
@@ -22,11 +26,14 @@ interface LightEntryPoint {
     val enablePushNotifications: Boolean
         get() = false
 
-
-    // See: https://developer.android.com/reference/android/app/Activity#setRecentsScreenshotEnabled(boolean)
-    // When LightOS moves to an external tool that's already in memory, it shows a system screenshot by default
-    // because there are no transition animations. here we override that to not show a screenshot (so it shows nothing instead).
-    // This feels more natural for tools that want to show specific UI immediately when foregrounded.
+    // See:
+    // https://developer.android.com/reference/android/app/Activity#setRecentsScreenshotEnabled(boolean)
+    // When LightOS moves to an external tool that's already in memory, it shows a system screenshot
+    // by default
+    // because there are no transition animations. here we override that to not show a screenshot
+    // (so it shows nothing instead).
+    // This feels more natural for tools that want to show specific UI immediately when
+    // foregrounded.
     // You probably want to leave this as "false" unless you're building for alternate devices.
     val enableRecentsScreenshots: Boolean
         get() = false

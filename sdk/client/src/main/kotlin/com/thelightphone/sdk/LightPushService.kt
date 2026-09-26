@@ -14,49 +14,34 @@ class LightPushService : PushService() {
     private val pushManager by lazy { LightPushManager(applicationContext) }
     companion object {
         // keep scope alive, UnifiedPush does not treat this like a normal service.
-        private val serviceScope by lazy {
-            CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        }
+        private val serviceScope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
     }
 
-    override fun onNewEndpoint(
-        endpoint: PushEndpoint,
-        instance: String
-    ) {
+    override fun onNewEndpoint(endpoint: PushEndpoint, instance: String) {
         if (LightConstants.PUSH_INSTANCE_REMOTE == instance) {
             serviceScope.launch {
-                pushManager.updatePushCredentials(pushEndpoint = endpoint)
+                pushManager.updatePushCredentials(pushEndpoint = endpoint, instance = instance)
             }
         }
     }
 
-    override fun onMessage(
-        message: PushMessage,
-        instance: String
-    ) {
+    override fun onMessage(message: PushMessage, instance: String) {
         if (LightConstants.PUSH_INSTANCE_REMOTE == instance) {
             serviceScope.launch {
-                LightSdkRegistry.entryPoint?.onPushNotification(message.content)
+                LightSdkRegistry.entryPoint?.onPushNotification(message.content, instance)
             }
         }
     }
 
-    override fun onRegistrationFailed(
-        reason: FailedReason,
-        instance: String
-    ) {
+    override fun onRegistrationFailed(reason: FailedReason, instance: String) {
         if (LightConstants.PUSH_INSTANCE_REMOTE == instance) {
-            serviceScope.launch {
-                pushManager.clearPushCredentials()
-            }
+            serviceScope.launch { pushManager.clearPushCredentials() }
         }
     }
 
     override fun onUnregistered(instance: String) {
         if (LightConstants.PUSH_INSTANCE_REMOTE == instance) {
-            serviceScope.launch {
-                pushManager.clearPushCredentials()
-            }
+            serviceScope.launch { pushManager.clearPushCredentials() }
         }
     }
 }

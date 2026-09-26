@@ -1,6 +1,7 @@
 package com.thelightphone.lightimessage
 
 import android.util.Log
+import com.thelightphone.lightimessage.data.datastore.PushRegistration
 import com.thelightphone.lightimessage.di.AppServices
 import com.thelightphone.sdk.EntryPoint
 import com.thelightphone.sdk.LightEntryPoint
@@ -13,9 +14,10 @@ import kotlinx.coroutines.flow.StateFlow
  * routes both lifecycle and push events here.
  *
  * Dependency singletons live in [AppServices], which is built lazily from the first
- * `SealedLightContext` handed to a screen or background job — the SDK deliberately does not
- * expose a raw `Context` to tool code, and this callback receives none.
+ * `SealedLightContext` handed to a screen or background job — the SDK deliberately does not expose
+ * a raw `Context` to tool code, and this callback receives none.
  */
+@OptIn(kotlin.time.ExperimentalTime::class)
 @EntryPoint
 object ImessageEntryPoint : LightEntryPoint {
 
@@ -25,13 +27,38 @@ object ImessageEntryPoint : LightEntryPoint {
 
     override suspend fun onToolCreate(serverData: StateFlow<LightServerData?>) {
         serverData.collect { data ->
+            val credentials = data?.pushCredentials
+            val token = credentials?.token
+            if (credentials != null && token != null) {
+                AppServices.peek()
+                        ?.pushRegistrationRepository
+                        ?.saveRegistration(
+                                PushRegistration(
+                                        id = "${credentials.instance}:$token",
+                                        distributorPackage = credentials.distributorPackage
+                                                        ?: "unknown",
+                                        endpointUrl = credentials.pushEndpoint,
+                                        instance = credentials.instance,
+                                        token = token,
+                                        registeredAt =
+                                                credentials.pushRegistrationDate
+                                                        .toEpochMilliseconds(),
+                                ),
+                        )
+                        ?.onFailure { error ->
+                            Log.e(TAG, "Failed to persist push registration", error)
+                        }
+            }
             // TODO(F-3): forward data.pushCredentials to the relay so it can route APNs-bridged
             // pushes to this device (the relay <-> rustpush endpoint mapping from design.md §2).
             Log.d(TAG, "LightOS registration data changed: $data")
         }
     }
 
-    override suspend fun onPushNotification(data: ByteArray) {
+    override suspend fun onPushNotification(data: ByteArray): Unit =
+            onPushNotification(data, "unknown")
+
+    override suspend fun onPushNotification(data: ByteArray, instance: String): Unit {
         val services = AppServices.peek()
         if (services == null) {
             // The process was started cold by the push receiver and no screen/job has run yet,
@@ -44,7 +71,7 @@ object ImessageEntryPoint : LightEntryPoint {
             )
             return
         }
-        val handled = services.pushProcessor.process(data)
+        val handled = services.pushProcessor.process(data, distributorInstance = instance)
         if (!handled) {
             Log.w(TAG, "Push payload not processed (${data.size}B); will resync via relay")
         }
